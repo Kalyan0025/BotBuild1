@@ -33,20 +33,20 @@ from google.genai import types   # <--Allows for tool use, like Google Search
 # ----------------------------------------------------
 
 # Streamlit page setup <--this should be the first streamlit command after imports
-st.set_page_config(page_title="My Bot",  # <-- Change this also but always keep " " this will be the name on the browser tag
+st.set_page_config(page_title="ReadySetRole",  # <-- Change this also but always keep " " this will be the name on the browser tag
                    layout="centered",    # <--- options are "centered", "wide", or nothing for default
                    initial_sidebar_state="expanded")  # <-- will expand the sidebar automatically
 
 # Load and display a custom image for your bot
 try:
     st.image(Image.open("Bot.png"),  # <-- make sure your image is called this or change it to be the same
-             caption="Bot Created by YOUR NAME (2025)",  # <-- change with your bot name and your own name
+             caption="Bot Created by GommaBelt)",  # <-- change with your bot name and your own name
              use_container_width=True)
 except Exception as e:
     st.error(f"Error loading image: {e}")
 
 # Bot Title
-st.markdown("<h1 style='text-align: center;'>YOUR BOT'S NAME</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>Ready Set Role</h1>", unsafe_allow_html=True)
 
 # --- Helper -----------------------------------------
 def load_developer_prompt() -> str:
