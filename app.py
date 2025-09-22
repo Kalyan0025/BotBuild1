@@ -39,18 +39,17 @@ st.set_page_config(page_title="ReadySetRole", # <-- Change this also but always 
 
 # --- Centered Logo and Title Section ---
 # Create three columns to center the content
-left_col, center_col, right_col = st.columns([2, 4, 2])
+left_col, center_col, right_col = st.columns([1, 2, 1])
 
 with center_col:
     try:
-        st.image(Image.open("Bot.png"), width=400)
-        st.markdown("<h6 style='text-align: center; margin: 0;'>Bot Created by GommaBelt</h6>", unsafe_allow_html=True)
+        st.image(Image.open("Bot1.png"), width=100)
+        st.markdown("<p style='text-align: center; margin: 0; font-size: 14px;'>Bot Created by GommaBelt</p>", unsafe_allow_html=True)
     except Exception as e:
         st.error(f"Error loading image: {e}")
 
     # Bot Title
     st.markdown("<h2 style='text-align: center; margin-top: 0;'>Ready Set Role</h2>", unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)
 # ----------------------------------------
 
 
