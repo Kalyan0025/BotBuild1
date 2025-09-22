@@ -17,10 +17,8 @@
 # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+# THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-# IMPORT Code Packages
 import streamlit as st  # <- streamlit
 from PIL import Image   # <- Python code to display images
 import io
@@ -32,16 +30,20 @@ from google import genai
 from google.genai import types   # <--Allows for tool use, like Google Search
 # ----------------------------------------------------
 
-# Streamlit page setup <--this should be the first streamlit command after imports
-st.set_page_config(page_title="My Bot",  # <-- Change this also but always keep " " this will be the name on the browser tag
-                   layout="centered",    # <--- options are "centered", "wide", or nothing for default
-                   initial_sidebar_state="expanded")  # <-- will expand the sidebar automatically
+# Streamlit page setup
+st.set_page_config(
+    page_title="My Bot",
+    layout="centered",
+    initial_sidebar_state="expanded"
+)
 
 # Load and display a custom image for your bot
 try:
-    st.image(Image.open("Bot.png"),  # <-- make sure your image is called this or change it to be the same
-             caption="Bot Created by YOUR NAME (2025)",  # <-- change with your bot name and your own name
-             use_container_width=True)
+    st.image(
+        Image.open("Bot.png"),
+        caption="Bot Created by YOUR NAME (2025)",
+        use_container_width=True
+    )
 except Exception as e:
     st.error(f"Error loading image: {e}")
 
@@ -51,7 +53,7 @@ st.markdown("<h1 style='text-align: center;'>YOUR BOT'S NAME</h1>", unsafe_allow
 # --- Helper -----------------------------------------
 def load_developer_prompt() -> str:
     try:
-        with open("identity.txt") as f:  # <-- Make sure your rules.text name matches this exactly
+        with open("identity.txt") as f:
             return f.read()
     except FileNotFoundError:
         st.warning("⚠️ 'identity.txt' not found. Using default prompt.")
@@ -67,35 +69,38 @@ def human_size(n: int) -> str:
 
 # --- Gemini configuration ---------------------------
 try:
-    # Activate Gemini GenAI model and access your API key in streamlit secrets
-    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])  # <-- make sure you have your google API key (from Google AI Studio) and put it in streamlit secrets as GEMINI_API_KEY = "yourapikey" use " "
-
-    # System instructions
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     system_instructions = load_developer_prompt()
+    search_tool = types.Tool(google_search=types.GoogleSearch())
 
-    # Enable Google Search Tool
-    search_tool = types.Tool(google_search=types.GoogleSearch())  # <-- optional Google Search tool
+    # Fix: Use a valid thinking_budget rather than -1 if your SDK version doesn't allow negative
+    # For Gemini 2.5 Pro, valid range is 128 to 32768, and -1 for dynamic thinking. :contentReference[oaicite:0]{index=0}
+    # For Flash / Flash-Lite, similar but with possibly different min values. :contentReference[oaicite:1]{index=1}
 
-    # Generation configuration for every turn
+    # Example fallback: try dynamic thinking; if invalid, use a positive number like 1024
+    try:
+        thinking_cfg = types.ThinkingConfig(thinking_budget=-1)
+    except Exception:
+        thinking_cfg = types.ThinkingConfig(thinking_budget=1024)
+
     generation_cfg = types.GenerateContentConfig(
         system_instruction=system_instructions,
         tools=[search_tool],
-        thinking_config=types.ThinkingConfig(thinking_budget=-1), # <--- set to dynamic thinking (model decides whether to use thinking based on context)
+        thinking_config=thinking_cfg,
         temperature=1.0,
         max_output_tokens=2048,
     )
-    
+
 except Exception as e:
     st.error(
         "Error initialising the Gemini client. "
-        "Check your `GEMINI_API_KEY` in Streamlit → Settings → Secrets."
+        "Check your `GEMINI_API_KEY` in Streamlit → Settings → Secrets. "
         f"Details: {e}"
     )
     st.stop()
 
 # Ensure chat history and files state stores exist
 st.session_state.setdefault("chat_history", [])
-# Each entry: {"name": str, "size": int, "mime": str, "file": google.genai.types.File}
 st.session_state.setdefault("uploaded_files", [])
 
 # --- Sidebar ----------------------------------------
@@ -103,7 +108,6 @@ with st.sidebar:
     st.title("⚙️ Controls")
     st.markdown("### About: Briefly describe your bot here for users.")
 
-    # Model Selection Expander (testing different models)
     with st.expander(":material/text_fields_alt: Model Selection", expanded=True):
         selected_model = st.selectbox(
             "Choose a model:",
@@ -112,27 +116,23 @@ with st.sidebar:
                 "gemini-2.5-flash",
                 "gemini-2.5-flash-lite"
             ],
-            index=2,  # Default to gemini-2.5-flash-lite
+            index=2,
             label_visibility="visible",
-            help="Response Per Day Limits: Pro = 100, Flash = 250, Flash-lite = 1000)"
+            help="Response Per Day Limits: Pro = 100, Flash = 250, Flash-lite = 1000"
         )
         st.caption(f"Selected: **{selected_model}**")
 
-        # Create chat now (post-selection), or re-create if the model changed
         if "chat" not in st.session_state:
             st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
         elif getattr(st.session_state.chat, "model", None) != selected_model:
             st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
 
-    # ---- Clear Chat button ----
     if st.button("🧹 Clear chat", use_container_width=True, help="Clear messages and reset chat context"):
         st.session_state.chat_history.clear()
-        # Recreate a fresh chat session (resets server-side history)
         st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
         st.toast("Chat cleared.")
         st.rerun()
 
-    # ---- File Upload (Files API) ----
     with st.expander(":material/attach_file: Files (PDF/TXT/DOCX)", expanded=True):
         st.caption(
             "Attach up to **5** files. They’ll be uploaded once and reused across turns.  "
@@ -146,30 +146,24 @@ with st.sidebar:
             label_visibility="collapsed"
         )
 
-        # Helper: Upload one file to Gemini Files API
         def _upload_to_gemini(u):
-            # Infer MIME type
             mime = u.type or (mimetypes.guess_type(u.name)[0] or "application/octet-stream")
             data = u.getvalue()
-            # Upload with bytes buffer; SDK infers metadata, we provide mime
             gfile = client.files.upload(
                 file=io.BytesIO(data),
                 config=types.UploadFileConfig(mime_type=mime)
             )
-            # Persist minimal metadata (avoid keeping the raw bytes in memory)
             return {
                 "name": u.name,
                 "size": len(data),
                 "mime": mime,
-                "file": gfile,          # has .name, .uri, .mime_type, .state, .expiration_time
+                "file": gfile,
             }
 
-        # Add newly selected files (respect cap of 5)
         if uploads:
             slots_left = max(0, 5 - len(st.session_state.uploaded_files))
             newly_added = []
             for u in uploads[:slots_left]:
-                # Skip duplicates by (name, size)
                 already = any((u.name == f["name"] and u.size == f["size"]) for f in st.session_state.uploaded_files)
                 if already:
                     continue
@@ -182,8 +176,7 @@ with st.sidebar:
 
             if newly_added:
                 st.toast(f"Uploaded: {', '.join(newly_added)}")
-              
-        # Show current file list with remove buttons
+
         st.markdown("**Attached files**")
         if st.session_state.uploaded_files:
             for idx, meta in enumerate(st.session_state.uploaded_files):
@@ -196,17 +189,16 @@ with st.sidebar:
                     )
                 with right:
                     if st.button("✖", key=f"remove_{idx}", help="Remove this file"):
-                      try:
-                        client.files.delete(name=meta['file'].name)
-                      except Exception:
-                          pass
-                      st.session_state.uploaded_files.pop(idx)
-                      st.rerun()
+                        try:
+                            client.files.delete(name=meta['file'].name)
+                        except Exception:
+                            pass
+                        st.session_state.uploaded_files.pop(idx)
+                        st.rerun()
             st.caption(f"{5 - len(st.session_state.uploaded_files)} slots remaining.")
         else:
             st.caption("No files attached.")
 
-    #show Stored files on Google (server side) --
     with st.expander("🛠️ Developer: See and Delete all files stored on Google server", expanded=False):
         try:
             files_list = client.files.list()
@@ -242,14 +234,12 @@ with st.sidebar:
 # Enable chat container and chat set-up
 #######################################
 with st.container():
-    # Replay chat history
     for msg in st.session_state.chat_history:
-        avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"  # <-- These emoji's can be changed
+        avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["parts"])
 
 def _ensure_files_active(files, max_wait_s: float = 12.0):
-    """Poll the Files API for PROCESSING files until ACTIVE or timeout."""
     deadline = time.time() + max_wait_s
     any_processing = True
     while any_processing and time.time() < deadline:
@@ -267,15 +257,12 @@ def _ensure_files_active(files, max_wait_s: float = 12.0):
             time.sleep(0.6)
           
 if user_prompt := st.chat_input("Message 'your bot name'…"):
-    # Record & show user message
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
-    with st.chat_message("user", avatar="👤"):  # <-- This emoji can be changed
+    with st.chat_message("user", avatar="👤"):
         st.markdown(user_prompt)
 
-    # Send message and display full response (no streaming)
-    with st.chat_message("assistant", avatar=":material/robot_2:"):  # <-- This bot image can be replaced with an emoji
+    with st.chat_message("assistant", avatar=":material/robot_2:"):
         try:
-            # If files are attached, ensure they're ready and include them in this turn
             contents_to_send = None
             if st.session_state.uploaded_files:
                 _ensure_files_active(st.session_state.uploaded_files)
@@ -283,26 +270,17 @@ if user_prompt := st.chat_input("Message 'your bot name'…"):
                     types.Part.from_text(text=user_prompt)
                 ] + [meta["file"] for meta in st.session_state.uploaded_files]
 
-            # Show spinner with message
             with st.spinner("🔍 Thinking about what I know about this ..."):
                 if contents_to_send is None:
-                    # No files attached: keep original behavior
                     response = st.session_state.chat.send_message(user_prompt)
                 else:
-                    # Files attached: pass a parts list (text + File objects)
                     response = st.session_state.chat.send_message(contents_to_send)
 
-            # Extract the full response text
             full_response = response.text if hasattr(response, "text") else str(response)
-
-            # Display the full response
             st.markdown(full_response)
-
         except Exception as e:
-            full_response = f"❌ Error from Gemini: {e}"
-            st.error(full_response)
+            st.error(f"❌ Error from Gemini: {e}")
 
-        # Record assistant reply
         st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
 
 # Footer
