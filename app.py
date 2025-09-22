@@ -38,6 +38,10 @@ st.set_page_config(page_title="ReadySetRole",  # <-- Change this also but always
                    initial_sidebar_state="expanded")  # <-- will expand the sidebar automatically
 
 # Load and display a custom image for your bot
+# Create three columns: one for spacing, one for the image, and one for spacing
+left_col, center_col, right_col = st.columns(3)
+
+# Place the image in the center column
 with center_col:
     try:
         st.image(Image.open("Bot.png"),
