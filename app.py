@@ -41,7 +41,7 @@ st.set_page_config(page_title="ReadySetRole",  # <-- Change this also but always
 try:
     st.image(Image.open("Bot.png"),  # <-- make sure your image is called this or change it to be the same
              caption="Bot Created by GommaBelt",  # <-- change with your bot name and your own name
-             use_container_width=True)
+             width=100)
 except Exception as e:
     st.error(f"Error loading image: {e}")
 
