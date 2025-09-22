@@ -47,7 +47,6 @@ except Exception as e:
 
 # Bot Title
 st.markdown("<h2 style='text-align: center; margin-top: 0;'>Ready Set Role</h2>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color:gray; font-size:12px; margin-top: 0;'>I can make mistakes—please verify important information.</p>", unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 # ----------------------------------------
 
