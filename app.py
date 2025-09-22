@@ -43,7 +43,7 @@ left_col, center_col, right_col = st.columns([1, 2, 1])
 
 with center_col:
     try:
-        st.image(Image.open("Bot1.png"), width=100)
+        st.image(Image.open("Bot1.png"), width=360)
         st.markdown("<p style='text-align: center; margin: 0; font-size: 14px;'>Bot Created by GommaBelt</p>", unsafe_allow_html=True)
     except Exception as e:
         st.error(f"Error loading image: {e}")
