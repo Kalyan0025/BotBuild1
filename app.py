@@ -43,12 +43,12 @@ col1, col2, col3 = st.columns([1, 2, 1])
 
 with col2:
     try:
-        st.image(Image.open("Bot1.png"), width=100)
+        st.image(Image.open("Bot1.png"), width=350)
     except Exception as e:
         st.error(f"Error loading image: {e}")
     
-    st.markdown("<p style='text-align: center; margin: 0; font-size: 14px;'>Bot Created by GommaBelt</p>", unsafe_allow_html=True)
-    st.markdown("<h2 style='text-align: center; margin-top: 0;'>Ready Set Role</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; margin: 0; font-size: 12px;'>Bot Created by GommaBelt</p>", unsafe_allow_html=True)
+    st.markdown("<h3 style='text-align: center; margin-top: 0;'>Ready. Set. Role.</h2>", unsafe_allow_html=True)
 # ----------------------------------------
 
 
