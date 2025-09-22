@@ -19,25 +19,21 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-import streamlit as st  # <- streamlit
-from PIL import Image   # <- Python code to display images
+import streamlit as st
+from PIL import Image
 import io
 import time
 import mimetypes
 
-# --- Google GenAI Models import ---------------------------
 from google import genai
-from google.genai import types   # <--Allows for tool use, like Google Search
-# ----------------------------------------------------
+from google.genai import types
 
-# Streamlit page setup
 st.set_page_config(
     page_title="My Bot",
     layout="centered",
     initial_sidebar_state="expanded"
 )
 
-# Load and display a custom image for your bot
 try:
     st.image(
         Image.open("Bot.png"),
@@ -47,10 +43,8 @@ try:
 except Exception as e:
     st.error(f"Error loading image: {e}")
 
-# Bot Title
 st.markdown("<h1 style='text-align: center;'>YOUR BOT'S NAME</h1>", unsafe_allow_html=True)
 
-# --- Helper -----------------------------------------
 def load_developer_prompt() -> str:
     try:
         with open("identity.txt") as f:
@@ -67,43 +61,30 @@ def human_size(n: int) -> str:
         n /= 1024.0
     return f"{n:.1f} TB"
 
-# --- Gemini configuration ---------------------------
 try:
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     system_instructions = load_developer_prompt()
     search_tool = types.Tool(google_search=types.GoogleSearch())
 
-    # Fix: Use a valid thinking_budget rather than -1 if your SDK version doesn't allow negative
-    # For Gemini 2.5 Pro, valid range is 128 to 32768, and -1 for dynamic thinking. :contentReference[oaicite:0]{index=0}
-    # For Flash / Flash-Lite, similar but with possibly different min values. :contentReference[oaicite:1]{index=1}
-
-    # Example fallback: try dynamic thinking; if invalid, use a positive number like 1024
-    try:
-        thinking_cfg = types.ThinkingConfig(thinking_budget=-1)
-    except Exception:
-        thinking_cfg = types.ThinkingConfig(thinking_budget=1024)
-
+    # Removed thinking_config to avoid validation error
     generation_cfg = types.GenerateContentConfig(
         system_instruction=system_instructions,
         tools=[search_tool],
-        thinking_config=thinking_cfg,
         temperature=1.0,
         max_output_tokens=2048,
     )
 
 except Exception as e:
     st.error(
-        "Error initialising the Gemini client. "
+        "Error initializing the Gemini client. "
         "Check your `GEMINI_API_KEY` in Streamlit → Settings → Secrets. "
         f"Details: {e}"
     )
     st.stop()
 
-# Ensure chat history and files state stores exist
 st.session_state.setdefault("chat_history", [])
 st.session_state.setdefault("uploaded_files", [])
 
-# --- Sidebar ----------------------------------------
 with st.sidebar:
     st.title("⚙️ Controls")
     st.markdown("### About: Briefly describe your bot here for users.")
@@ -127,7 +108,7 @@ with st.sidebar:
         elif getattr(st.session_state.chat, "model", None) != selected_model:
             st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
 
-    if st.button("🧹 Clear chat", use_container_width=True, help="Clear messages and reset chat context"):
+    if st.button("🧹 Clear chat", use_container_width=True):
         st.session_state.chat_history.clear()
         st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
         st.toast("Chat cleared.")
@@ -135,9 +116,8 @@ with st.sidebar:
 
     with st.expander(":material/attach_file: Files (PDF/TXT/DOCX)", expanded=True):
         st.caption(
-            "Attach up to **5** files. They’ll be uploaded once and reused across turns.  "
-            "Files are stored temporarily (≈48 hours) in Google’s File store and count toward "
-            "your 20 GB storage cap until deleted (clicking ✖) or expired."
+            "Attach up to **5** files. They’ll be uploaded once and reused across turns. "
+            "Files are stored temporarily (~48 hrs) and count toward your 20GB cap."
         )
         uploads = st.file_uploader(
             "Upload files",
@@ -173,7 +153,6 @@ with st.sidebar:
                     newly_added.append(meta["name"])
                 except Exception as e:
                     st.error(f"File upload failed for **{u.name}**: {e}")
-
             if newly_added:
                 st.toast(f"Uploaded: {', '.join(newly_added)}")
 
@@ -183,12 +162,11 @@ with st.sidebar:
                 left, right = st.columns([0.88, 0.12])
                 with left:
                     st.write(
-                        f"• {meta['name']}"
-                        f"<small>{human_size(meta['size'])} · {meta['mime']}</small>",
+                        f"• {meta['name']} <small>{human_size(meta['size'])} · {meta['mime']}</small>",
                         unsafe_allow_html=True
                     )
                 with right:
-                    if st.button("✖", key=f"remove_{idx}", help="Remove this file"):
+                    if st.button("✖", key=f"remove_{idx}"):
                         try:
                             client.files.delete(name=meta['file'].name)
                         except Exception:
@@ -199,7 +177,7 @@ with st.sidebar:
         else:
             st.caption("No files attached.")
 
-    with st.expander("🛠️ Developer: See and Delete all files stored on Google server", expanded=False):
+    with st.expander("🛠️ Developer: See and Delete all files on Google", expanded=False):
         try:
             files_list = client.files.list()
             if not files_list:
@@ -210,11 +188,7 @@ with st.sidebar:
                     exp_str = exp if exp else "?"
                     size = getattr(f, "size_bytes", None)
                     size_str = f"{size/1024:.1f} KB" if size else "?"
-                    st.write(
-                        f"• **{f.name}**  "
-                        f"({f.mime_type}, {size_str})  "
-                        f"Expires: {exp_str}"
-                    )
+                    st.write(f"• **{f.name}** ({f.mime_type}, {size_str}) Expires: {exp_str}")
                 if st.button("🗑️ Delete all files", use_container_width=True):
                     failed = []
                     for f in files_list:
@@ -225,14 +199,11 @@ with st.sidebar:
                     if failed:
                         st.error(f"Failed to delete: {', '.join(failed)}")
                     else:
-                        st.success("All files deleted from server.")
+                        st.success("All files deleted.")
                         st.rerun()
         except Exception as e:
             st.error(f"Could not fetch files list: {e}")
 
-#######################################
-# Enable chat container and chat set-up
-#######################################
 with st.container():
     for msg in st.session_state.chat_history:
         avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"
@@ -255,7 +226,7 @@ def _ensure_files_active(files, max_wait_s: float = 12.0):
                     pass
         if any_processing:
             time.sleep(0.6)
-          
+
 if user_prompt := st.chat_input("Message 'your bot name'…"):
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
     with st.chat_message("user", avatar="👤"):
@@ -283,7 +254,6 @@ if user_prompt := st.chat_input("Message 'your bot name'…"):
 
         st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
 
-# Footer
 st.markdown(
     "<div style='text-align:center;color:gray;font-size:12px;'>"
     "I can make mistakes—please verify important information."
