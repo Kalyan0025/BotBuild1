@@ -1,4 +1,6 @@
-# (same license header...)
+# CUSTOM BOT TEMPLATE
+# Copyright (c) 2025 Ronald A. Beghetto
+# (license header unchanged)
 
 import streamlit as st
 from PIL import Image
@@ -11,8 +13,8 @@ from google.genai import types
 # ==== ReadySetRole config ====
 BOT_NAME = "ReadySetRole"
 CREATOR = "Kalyan Kadavanti Sudhakar"
-PROMPT_PATH = "identity.txt"             # <- uses your existing file
-DEFAULT_MODEL = "gemini-2.5-pro"         # pro tracks longer prompts better
+PROMPT_PATH = "identity.txt"             # uses your existing file
+DEFAULT_MODEL = "gemini-2.5-pro"         # pro tracks longer prompts best
 # =============================
 
 st.set_page_config(page_title=BOT_NAME, layout="centered", initial_sidebar_state="expanded")
@@ -71,6 +73,7 @@ try:
     # Optional tool (remove if you don't need search grounding)
     search_tool = types.Tool(google_search=types.GoogleSearch())
 
+    # Thinking config may not exist in your tier; guard it
     try:
         think_cfg = types.ThinkingConfig(thinking_budget=-1)
     except Exception:
@@ -208,45 +211,56 @@ with st.container():
 
 # ---------- tailor flow ----------
 if tailor_now:
-    st.session_state.jd_text = jd_text.strip()
-    parts = []
-    scaffold = (
-        "FOLLOW READYSETROLE FLOW STRICTLY.\n"
-        "Inputs:\n"
-        f"<<MASTER_RESUME_TEXT>>\n{st.session_state.master_resume_text}\n"
-        "<<JOB_DESCRIPTION>>\n"
-        f"{st.session_state.jd_text}\n"
-        "If a Master Resume file is present, read it for evidence too.\n\n"
-        "Tasks:\n"
-        "1) QuickScore → Pre-Score (overall + sub-scores + top missing keywords + ≤60-word explanation).\n"
-        "2) SuggestPacks → grouped keyword Packs with predicted Δ; show numbered options.\n"
-        "3) If no user selection yet, propose 0 = Apply All (safe).\n"
-        "4) ApplySuggestions + FitToLength → ATS-safe resume (1 page default) + GenerateCoverLetter (~200 words).\n"
-        "5) Return Post-Score + Evidence Map + ATS Preview + Change Log + Metric Badges + Confidence Receipt.\n"
-        "6) Offer BoostScore (optional, 2–3 taps).\n"
-        "Rules: never fabricate; use only resume + JD; unproven → Exposure/Learning; minimal numbered UI."
-    )
-    parts.append(types.Part.from_text(scaffold))
+    # guard rails
+    if not (st.session_state.master_resume_text or st.session_state.master_resume_file):
+        st.warning("Please paste or upload your Master Resume first, then click Tailor Now.")
+    elif not jd_text.strip():
+        st.warning("Please paste the full Job Description (JD) and click Tailor Now.")
+    else:
+        st.session_state.jd_text = jd_text.strip()
 
-    if st.session_state.master_resume_file:
-        ensure_files_active(client, [st.session_state.master_resume_file])
-        parts.append(st.session_state.master_resume_file["file"])
+        # Build the message parts for this turn — use plain strings, not types.Part
+        scaffold = (
+            "FOLLOW READYSETROLE FLOW STRICTLY.\n"
+            "Inputs:\n"
+            f"<<MASTER_RESUME_TEXT>>\n{st.session_state.master_resume_text}\n"
+            "<<JOB_DESCRIPTION>>\n"
+            f"{st.session_state.jd_text}\n"
+            "If a Master Resume file is present, read it for evidence too.\n\n"
+            "Tasks:\n"
+            "1) QuickScore → Pre-Score (overall + sub-scores + top missing keywords + ≤60-word explanation).\n"
+            "2) SuggestPacks → grouped keyword Packs with predicted Δ; show numbered options.\n"
+            "3) If no user selection yet, propose 0 = Apply All (safe).\n"
+            "4) ApplySuggestions + FitToLength → ATS-safe resume (1 page default) + GenerateCoverLetter (~200 words).\n"
+            "5) Return Post-Score + Evidence Map + ATS Preview + Change Log + Metric Badges + Confidence Receipt.\n"
+            "6) Offer BoostScore (optional, 2–3 taps).\n"
+            "Rules: never fabricate; use only resume + JD; unproven → Exposure/Learning; minimal numbered UI."
+        )
 
-    if st.session_state.uploaded_files:
-        ensure_files_active(client, st.session_state.uploaded_files)
-        parts.extend([meta["file"] for meta in st.session_state.uploaded_files])
+        # Start with the scaffold string
+        parts = [scaffold]
 
-    with st.chat_message("assistant", avatar=":material/robot_2:"):
-        try:
-            with st.spinner("🔍 Scoring your fit and preparing Packs…"):
-                resp = st.session_state.chat.send_message(parts)
-            text = resp.text if hasattr(resp, "text") else str(resp)
-            st.markdown(text)
-            st.session_state.chat_history.append({"role":"assistant","parts":text})
-        except Exception as e:
-            err = f"❌ Error from Gemini: {e}"
-            st.error(err)
-            st.session_state.chat_history.append({"role":"assistant","parts":err})
+        # Add Master Resume file (if present)
+        if st.session_state.master_resume_file:
+            ensure_files_active(client, [st.session_state.master_resume_file])
+            parts.append(st.session_state.master_resume_file["file"])
+
+        # Add any extra files
+        if st.session_state.uploaded_files:
+            ensure_files_active(client, st.session_state.uploaded_files)
+            parts.extend([meta["file"] for meta in st.session_state.uploaded_files])
+
+        with st.chat_message("assistant", avatar=":material/robot_2:"):
+            try:
+                with st.spinner("🔍 Scoring your fit and preparing Packs…"):
+                    resp = st.session_state.chat.send_message(parts)
+                text = resp.text if hasattr(resp, "text") else str(resp)
+                st.markdown(text)
+                st.session_state.chat_history.append({"role":"assistant","parts":text})
+            except Exception as e:
+                err = f"❌ Error from Gemini: {e}"
+                st.error(err)
+                st.session_state.chat_history.append({"role":"assistant","parts":err})
 
 # ---------- chat input (packs selection, etc.) ----------
 placeholder = "Reply with options (e.g., 1,3 or 0) or paste a new JD…"
@@ -257,6 +271,7 @@ if user_prompt := st.chat_input(placeholder):
 
     with st.chat_message("assistant", avatar=":material/robot_2:"):
         try:
+            # Context reminder as plain string
             ctx = (
                 "Context (do not echo):\n"
                 f"- Master Resume text length: {len(st.session_state.master_resume_text)}\n"
@@ -265,7 +280,7 @@ if user_prompt := st.chat_input(placeholder):
                 "Apply suggestions → return Post-Score + tailored resume + cover letter + evidence. "
                 "Never fabricate; keep ATS-safe; minimal numbered UI."
             )
-            parts = [types.Part.from_text(ctx), types.Part.from_text(user_prompt)]
+            parts = [ctx, user_prompt]
 
             files_for_turn = []
             if st.session_state.master_resume_file: files_for_turn.append(st.session_state.master_resume_file)
