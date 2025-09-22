@@ -38,7 +38,7 @@ st.set_page_config(page_title="ReadySetRole", # <-- Change this also but always 
                     initial_sidebar_state="expanded") # <-- will expand the sidebar automatically
 
 # --- Centered Logo and Title Section ---
-# Create three columns to center the content
+# Create a single column to center the content
 left_col, center_col, right_col = st.columns([1, 2, 1])
 
 with center_col:
