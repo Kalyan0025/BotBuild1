@@ -119,8 +119,6 @@ def _ensure_files_active(files, max_wait_s: float = 12.0):
 # Ensure chat history and files state stores exist
 st.session_state.setdefault("chat_history", [])
 st.session_state.setdefault("uploaded_files", [])
-st.session_state.setdefault("job_description_text", "")
-st.session_state.setdefault("initial_prompt_sent", False)
 
 # --- Sidebar ----------------------------------------
 with st.sidebar:
@@ -152,8 +150,6 @@ with st.sidebar:
     if st.button("🧹 Clear chat", use_container_width=True, help="Clear messages and reset chat context"):
         st.session_state.chat_history.clear()
         st.session_state.uploaded_files.clear()
-        st.session_state.job_description_text = ""
-        st.session_state.initial_prompt_sent = False
         st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
         st.toast("Chat cleared.")
         st.rerun()
@@ -263,22 +259,15 @@ with st.container():
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["parts"])
 
-    # Onboarding message if no files are uploaded
-    if not st.session_state.uploaded_files:
-        st.info("To get started, please use the sidebar to upload your master resume and then paste your job description into the chatbox below.")
+    # First-time user message
+    if not st.session_state.chat_history:
+        st.info("To get started, please use the sidebar to upload your master resume, and then paste your job description into the chatbox below to begin.")
 
     # Main chat loop
     if user_prompt := st.chat_input("Start here: Paste your JD and ask your question"):
-        # If the user has uploaded files, process the JD from their prompt
-        if st.session_state.uploaded_files and not st.session_state.job_description_text:
-            st.session_state.job_description_text = user_prompt
-            display_prompt = "Initial files uploaded. JD received. Analyzing..."
-        else:
-            display_prompt = user_prompt
-
-        st.session_state.chat_history.append({"role": "user", "parts": display_prompt})
+        st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
         with st.chat_message("user", avatar="👤"):
-            st.markdown(display_prompt)
+            st.markdown(user_prompt)
 
         with st.chat_message("assistant", avatar=":material/robot_2:"):
             try:
@@ -286,8 +275,6 @@ with st.container():
                 if st.session_state.uploaded_files:
                     _ensure_files_active(st.session_state.uploaded_files)
                     contents_to_send += [meta["file"] for meta in st.session_state.uploaded_files]
-                if st.session_state.job_description_text:
-                    contents_to_send.append(types.Part.from_text(text=f"Job Description: {st.session_state.job_description_text}"))
 
                 with st.spinner("🔍 Thinking..."):
                     response = st.session_state.chat.send_message(contents_to_send)
