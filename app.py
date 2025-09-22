@@ -38,12 +38,13 @@ st.set_page_config(page_title="ReadySetRole",  # <-- Change this also but always
                    initial_sidebar_state="expanded")  # <-- will expand the sidebar automatically
 
 # Load and display a custom image for your bot
-try:
-    st.image(Image.open("Bot.png"),  # <-- make sure your image is called this or change it to be the same
-             caption="Bot Created by GommaBelt",  # <-- change with your bot name and your own name
-             width=100)
-except Exception as e:
-    st.error(f"Error loading image: {e}")
+with center_col:
+    try:
+        st.image(Image.open("Bot.png"),
+                 caption="Bot Created by GommaBelt",
+                 width=100) # You can adjust the width as needed
+    except Exception as e:
+        st.error(f"Error loading image: {e}")
 
 # Bot Title
 st.markdown("<h1 style='text-align: center;'>Ready Set Role</h1>", unsafe_allow_html=True)
