@@ -34,15 +34,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- Centering the Image ---
 try:
-    st.image(
-    Image.open("Bot1.png"),
-    caption="Bot Created by GommaBelt (2025)",
-    width=340
-    )
+    # Use columns to center the image
+    col1, col2, col3 = st.columns([1, 6, 1])
+    with col2:
+        st.image(
+            Image.open("Bot1.png"),
+            caption="Bot Created by GommaBelt (2025)",
+            width=340
+        )
 except Exception as e:
     st.error(f"Error loading image: {e}")
 
+# --- Centering the Title ---
 st.markdown("<h1 style='text-align: center;'>Ready Set Role</h1>", unsafe_allow_html=True)
 
 def load_developer_prompt() -> str:
@@ -204,6 +209,18 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Could not fetch files list: {e}")
 
+# --- Centering Chat Messages ---
+# Inject custom CSS to center chat messages
+st.markdown(
+    """
+    <style>
+        .stChatMessage {
+            text-align: center;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 with st.container():
     for msg in st.session_state.chat_history:
         avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"
@@ -254,6 +271,7 @@ if user_prompt := st.chat_input("Message 'your bot name'…"):
 
         st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
 
+# --- Centering the Footer ---
 st.markdown(
     "<div style='text-align:center;color:gray;font-size:12px;'>"
     "I can make mistakes—please verify important information."
