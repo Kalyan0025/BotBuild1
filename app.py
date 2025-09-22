@@ -38,15 +38,18 @@ st.set_page_config(page_title="ReadySetRole", # <-- Change this also but always 
                     initial_sidebar_state="expanded") # <-- will expand the sidebar automatically
 
 # --- Centered Logo and Title Section ---
-st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
-try:
-    st.image(Image.open("Bot.png"), width=100)
-    st.markdown("<h6 style='text-align: center; margin: 0;'>Bot Created by GommaBelt</h6>", unsafe_allow_html=True)
-except Exception as e:
-    st.error(f"Error loading image: {e}")
+# Create three columns to center the content
+left_col, center_col, right_col = st.columns([1, 2, 1])
 
-# Bot Title
-st.markdown("<h2 style='text-align: center; margin-top: 0;'>Ready Set Role</h2>", unsafe_allow_html=True)
+with center_col:
+    try:
+        st.image(Image.open("Bot.png"), width=100)
+        st.markdown("<h6 style='text-align: center; margin: 0;'>Bot Created by GommaBelt</h6>", unsafe_allow_html=True)
+    except Exception as e:
+        st.error(f"Error loading image: {e}")
+
+    # Bot Title
+    st.markdown("<h2 style='text-align: center; margin-top: 0;'>Ready Set Role</h2>", unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 # ----------------------------------------
 
