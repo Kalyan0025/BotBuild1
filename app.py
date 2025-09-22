@@ -97,6 +97,25 @@ except Exception as e:
     )
     st.stop()
 
+# --- Utility Function Moved to Global Scope ---
+def _ensure_files_active(files, max_wait_s: float = 12.0):
+    """Poll the Files API for PROCESSING files until ACTIVE or timeout."""
+    deadline = time.time() + max_wait_s
+    any_processing = True
+    while any_processing and time.time() < deadline:
+        any_processing = False
+        for i, meta in enumerate(files):
+            fobj = meta["file"]
+            if getattr(fobj, "state", "") not in ("ACTIVE",):
+                any_processing = True
+                try:
+                    updated = client.files.get(name=fobj.name)
+                    files[i]["file"] = updated
+                except Exception:
+                    pass
+        if any_processing:
+            time.sleep(0.6)
+
 # Ensure chat history and files state stores exist
 st.session_state.setdefault("chat_history", [])
 st.session_state.setdefault("uploaded_files", [])
