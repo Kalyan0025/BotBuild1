@@ -22,14 +22,14 @@
 
 # IMPORT Code Packages
 import streamlit as st  # <- streamlit
-from PIL import Image   # <- Python code to display images
+from PIL import Image    # <- Python code to display images
 import io
 import time
 import mimetypes
 
 # --- Google GenAI Models import ---------------------------
 from google import genai
-from google.genai import types   # <--Allows for tool use, like Google Search
+from google.genai import types  # <--Allows for tool use, like Google Search
 # ----------------------------------------------------
 
 # Streamlit page setup <--this should be the first streamlit command after imports
@@ -80,7 +80,6 @@ try:
     generation_cfg = types.GenerateContentConfig(
         system_instruction=system_instructions,
         tools=[search_tool],
-        thinking_config=types.ThinkingConfig(thinking_budget=-1), # <--- set to dynamic thinking (model decides whether to use thinking based on context)
         temperature=1.0,
         max_output_tokens=2048,
     )
@@ -161,7 +160,7 @@ with st.sidebar:
                 "name": u.name,
                 "size": len(data),
                 "mime": mime,
-                "file": gfile,          # has .name, .uri, .mime_type, .state, .expiration_time
+                "file": gfile,        # has .name, .uri, .mime_type, .state, .expiration_time
             }
 
         # Add newly selected files (respect cap of 5)
@@ -182,7 +181,7 @@ with st.sidebar:
 
             if newly_added:
                 st.toast(f"Uploaded: {', '.join(newly_added)}")
-              
+            
         # Show current file list with remove buttons
         st.markdown("**Attached files**")
         if st.session_state.uploaded_files:
@@ -219,7 +218,7 @@ with st.sidebar:
                     size = getattr(f, "size_bytes", None)
                     size_str = f"{size/1024:.1f} KB" if size else "?"
                     st.write(
-                        f"• **{f.name}**  "
+                        f"• **{f.name}** "
                         f"({f.mime_type}, {size_str})  "
                         f"Expires: {exp_str}"
                     )
@@ -265,7 +264,7 @@ def _ensure_files_active(files, max_wait_s: float = 12.0):
                     pass
         if any_processing:
             time.sleep(0.6)
-          
+            
 if user_prompt := st.chat_input("Message 'your bot name'…"):
     # Record & show user message
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
