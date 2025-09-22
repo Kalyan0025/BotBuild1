@@ -21,42 +21,41 @@
 # SOFTWARE.
 
 # IMPORT Code Packages
-import streamlit as st  # <- streamlit
-from PIL import Image   # <- Python code to display images
+import streamlit as st
+from PIL import Image
 import io
 import time
 import mimetypes
 
 # --- Google GenAI Models import ---------------------------
 from google import genai
-from google.genai import types   # <--Allows for tool use, like Google Search
+from google.genai import types # <--Allows for tool use, like Google Search
 # ----------------------------------------------------
 
 # Streamlit page setup <--this should be the first streamlit command after imports
-st.set_page_config(page_title="ReadySetRole",  # <-- Change this also but always keep " " this will be the name on the browser tag
-                   layout="centered",    # <--- options are "centered", "wide", or nothing for default
-                   initial_sidebar_state="expanded")  # <-- will expand the sidebar automatically
+st.set_page_config(page_title="ReadySetRole", # <-- Change this also but always keep " " this will be the name on the browser tag
+                    layout="centered",   # <--- options are "centered", "wide", or nothing for default
+                    initial_sidebar_state="expanded") # <-- will expand the sidebar automatically
 
-# Load and display a custom image for your bot
-# Create three columns: one for spacing, one for the image, and one for spacing
-left_col, center_col, right_col = st.columns(3)
-
-# Place the image in the center column
-with center_col:
-    try:
-        st.image(Image.open("Bot.png"),
-                 caption="Bot Created by GommaBelt",
-                 width=100) # You can adjust the width as needed
-    except Exception as e:
-        st.error(f"Error loading image: {e}")
+# --- Centered Logo and Title Section ---
+st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
+try:
+    st.image(Image.open("Bot.png"), width=100)
+    st.markdown("<h6 style='text-align: center; margin: 0;'>Bot Created by GommaBelt</h6>", unsafe_allow_html=True)
+except Exception as e:
+    st.error(f"Error loading image: {e}")
 
 # Bot Title
-st.markdown("<h1 style='text-align: center;'>Ready Set Role</h1>", unsafe_allow_html=True)
+st.markdown("<h2 style='text-align: center; margin-top: 0;'>Ready Set Role</h2>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color:gray; font-size:12px; margin-top: 0;'>I can make mistakes—please verify important information.</p>", unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
+# ----------------------------------------
+
 
 # --- Helper -----------------------------------------
 def load_developer_prompt() -> str:
     try:
-        with open("identity.txt") as f:  # <-- Make sure your rules.text name matches this exactly
+        with open("identity.txt") as f: # <-- Make sure your rules.text name matches this exactly
             return f.read()
     except FileNotFoundError:
         st.warning("⚠️ 'identity.txt' not found. Using default prompt.")
@@ -73,13 +72,13 @@ def human_size(n: int) -> str:
 # --- Gemini configuration ---------------------------
 try:
     # Activate Gemini GenAI model and access your API key in streamlit secrets
-    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])  # <-- make sure you have your google API key (from Google AI Studio) and put it in streamlit secrets as GEMINI_API_KEY = "yourapikey" use " "
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"]) # <-- make sure you have your google API key (from Google AI Studio) and put it in streamlit secrets as GEMINI_API_KEY = "yourapikey" use " "
 
     # System instructions
     system_instructions = load_developer_prompt()
 
     # Enable Google Search Tool
-    search_tool = types.Tool(google_search=types.GoogleSearch())  # <-- optional Google Search tool
+    search_tool = types.Tool(google_search=types.GoogleSearch()) # <-- optional Google Search tool
 
     # Generation configuration for every turn
     generation_cfg = types.GenerateContentConfig(
@@ -117,7 +116,7 @@ with st.sidebar:
                 "gemini-2.5-flash",
                 "gemini-2.5-flash-lite"
             ],
-            index=2,  # Default to gemini-2.5-flash-lite
+            index=2, # Default to gemini-2.5-flash-lite
             label_visibility="visible",
             help="Response Per Day Limits: Pro = 100, Flash = 250, Flash-lite = 1000)"
         )
@@ -166,7 +165,7 @@ with st.sidebar:
                 "name": u.name,
                 "size": len(data),
                 "mime": mime,
-                "file": gfile,          # has .name, .uri, .mime_type, .state, .expiration_time
+                "file": gfile,        # has .name, .uri, .mime_type, .state, .expiration_time
             }
 
         # Add newly selected files (respect cap of 5)
@@ -187,7 +186,7 @@ with st.sidebar:
 
             if newly_added:
                 st.toast(f"Uploaded: {', '.join(newly_added)}")
-              
+            
         # Show current file list with remove buttons
         st.markdown("**Attached files**")
         if st.session_state.uploaded_files:
@@ -201,12 +200,12 @@ with st.sidebar:
                     )
                 with right:
                     if st.button("✖", key=f"remove_{idx}", help="Remove this file"):
-                      try:
-                        client.files.delete(name=meta['file'].name)
-                      except Exception:
-                          pass
-                      st.session_state.uploaded_files.pop(idx)
-                      st.rerun()
+                        try:
+                            client.files.delete(name=meta['file'].name)
+                        except Exception:
+                            pass
+                        st.session_state.uploaded_files.pop(idx)
+                        st.rerun()
             st.caption(f"{5 - len(st.session_state.uploaded_files)} slots remaining.")
         else:
             st.caption("No files attached.")
@@ -224,7 +223,7 @@ with st.sidebar:
                     size = getattr(f, "size_bytes", None)
                     size_str = f"{size/1024:.1f} KB" if size else "?"
                     st.write(
-                        f"• **{f.name}**  "
+                        f"• **{f.name}** "
                         f"({f.mime_type}, {size_str})  "
                         f"Expires: {exp_str}"
                     )
@@ -270,7 +269,7 @@ def _ensure_files_active(files, max_wait_s: float = 12.0):
                     pass
         if any_processing:
             time.sleep(0.6)
-          
+            
 if user_prompt := st.chat_input("Start here: Master Resume + JD"):
     # Record & show user message
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
