@@ -36,14 +36,14 @@ st.set_page_config(
 
 try:
     st.image(
-        Image.open("Bot.png"),
+        Image.open("Bot1.png"),
         caption="Bot Created by YOUR NAME (2025)",
         use_container_width=True
     )
 except Exception as e:
     st.error(f"Error loading image: {e}")
 
-st.markdown("<h1 style='text-align: center;'>YOUR BOT'S NAME</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>Ready Set Role</h1>", unsafe_allow_html=True)
 
 def load_developer_prompt() -> str:
     try:
