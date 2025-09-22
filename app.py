@@ -101,8 +101,8 @@ except Exception as e:
 st.session_state.setdefault("chat_history", [])
 st.session_state.setdefault("uploaded_files", [])
 st.session_state.setdefault("master_resume_uploaded", False)
-st.session_state.setdefault("job_description_pasted", False)
-st.session_state.setdefault("job_description_text", "")
+st.session_state.setdefault("job_description_pasted", "")
+st.session_state.setdefault("initial_prompt_sent", False)
 
 # --- Sidebar ----------------------------------------
 with st.sidebar:
@@ -135,8 +135,8 @@ with st.sidebar:
         st.session_state.chat_history.clear()
         st.session_state.uploaded_files.clear()
         st.session_state.master_resume_uploaded = False
-        st.session_state.job_description_pasted = False
-        st.session_state.job_description_text = ""
+        st.session_state.job_description_pasted = ""
+        st.session_state.initial_prompt_sent = False
         st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
         st.toast("Chat cleared.")
         st.rerun()
@@ -170,7 +170,6 @@ with st.sidebar:
                 "file": gfile,
             }
 
-        # Add newly selected files (respect cap of 5)
         if uploads:
             slots_left = max(0, 5 - len(st.session_state.uploaded_files))
             newly_added = []
@@ -184,7 +183,6 @@ with st.sidebar:
                     newly_added.append(meta["name"])
                 except Exception as e:
                     st.error(f"File upload failed for **{u.name}**: {e}")
-
             if newly_added:
                 st.session_state.master_resume_uploaded = True
                 st.toast(f"Uploaded: {', '.join(newly_added)}")
@@ -207,7 +205,8 @@ with st.sidebar:
                         except Exception:
                             pass
                         st.session_state.uploaded_files.pop(idx)
-                        st.session_state.master_resume_uploaded = False
+                        if not st.session_state.uploaded_files:
+                            st.session_state.master_resume_uploaded = False
                         st.rerun()
             st.caption(f"{5 - len(st.session_state.uploaded_files)} slots remaining.")
         else:
@@ -241,91 +240,59 @@ with st.sidebar:
             st.error(f"Could not fetch files list: {e}")
 
 #######################################
-# Enable chat container and chat set-up
+# Main chat container and chat set-up
 #######################################
 with st.container():
+    # Replay chat history
     for msg in st.session_state.chat_history:
         avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["parts"])
 
-def _ensure_files_active(files, max_wait_s: float = 12.0):
-    deadline = time.time() + max_wait_s
-    any_processing = True
-    while any_processing and time.time() < deadline:
-        any_processing = False
-        for i, meta in enumerate(files):
-            fobj = meta["file"]
-            if getattr(fobj, "state", "") not in ("ACTIVE",):
-                any_processing = True
-                try:
-                    updated = client.files.get(name=fobj.name)
-                    files[i]["file"] = updated
-                except Exception:
-                    pass
-        if any_processing:
-            time.sleep(0.6)
-
-if not st.session_state.master_resume_uploaded:
-    st.info("Upload your master resume to begin.")
-else:
-    jd_input = st.text_area("Paste your Job Description (JD) here:", height=300)
-    
-    if st.button("Submit JD"):
-        st.session_state.job_description_text = jd_input
-        st.session_state.job_description_pasted = True
-        st.rerun()
-
-if st.session_state.master_resume_uploaded and st.session_state.job_description_pasted:
-    user_prompt = f"Here is my master resume: [attached files]. Here is the job description: {st.session_state.job_description_text}"
-    
-    if "initial_prompt_sent" not in st.session_state:
-        st.session_state.chat_history.append({"role": "user", "parts": "Initial files and JD submitted. Begin processing."})
-        st.session_state.initial_prompt_sent = True
+    # File and JD input for first-time use
+    if not st.session_state.master_resume_uploaded or not st.session_state.job_description_pasted:
+        if not st.session_state.master_resume_uploaded:
+            st.info("Please upload your master resume to get started.")
         
-        with st.chat_message("user", avatar="👤"):
-            st.markdown("Processing files and JD. Stand by...")
-    
-        with st.chat_message("assistant", avatar=":material/robot_2:"):
-            try:
-                contents_to_send = [
-                    types.Part.from_text(text=user_prompt)
-                ] + [meta["file"] for meta in st.session_state.uploaded_files]
-                
-                with st.spinner("🔍 Analyzing documents to create your tailored resume..."):
-                    response = st.session_state.chat.send_message(contents_to_send)
-                
-                full_response = response.text if hasattr(response, "text") else str(response)
-                st.markdown(full_response)
-                
-            except Exception as e:
-                full_response = f"❌ Error from Gemini: {e}"
-                st.error(full_response)
-                
-            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-            st.rerun()
-
-    # Continue the conversation based on user's new inputs after the initial processing
-    if user_prompt_follow_up := st.chat_input("Ask for a score, changes, or more boosters:"):
-        st.session_state.chat_history.append({"role": "user", "parts": user_prompt_follow_up})
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(user_prompt_follow_up)
+        # Display the text area for JD input only if a resume is uploaded
+        if st.session_state.master_resume_uploaded and not st.session_state.job_description_pasted:
+            jd_input = st.text_area("Paste your Job Description (JD) here:", key="jd_input", height=300)
             
-        with st.chat_message("assistant", avatar=":material/robot_2:"):
-            try:
-                contents_to_send = [
-                    types.Part.from_text(text=user_prompt_follow_up)
-                ] + [meta["file"] for meta in st.session_state.uploaded_files]
+            if st.button("Submit JD"):
+                if jd_input:
+                    st.session_state.job_description_pasted = jd_input
+                    user_initial_prompt = f"Here is my master resume: [attached files]. Here is the job description: {st.session_state.job_description_pasted}"
+                    st.session_state.chat_history.append({"role": "user", "parts": user_initial_prompt})
+                    st.rerun()
+                else:
+                    st.warning("Please paste the job description before submitting.")
 
-                with st.spinner("🔍 Thinking..."):
-                    response = st.session_state.chat.send_message(contents_to_send)
+    # Handle chat input for subsequent interactions
+    if st.session_state.master_resume_uploaded and st.session_state.job_description_pasted:
+        if user_prompt := st.chat_input("Ask for a score, changes, or more boosters:"):
+            st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(user_prompt)
+
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                try:
+                    contents_to_send = [types.Part.from_text(text=user_prompt)]
+                    if st.session_state.uploaded_files:
+                        _ensure_files_active(st.session_state.uploaded_files)
+                        contents_to_send += [meta["file"] for meta in st.session_state.uploaded_files]
+                    if st.session_state.job_description_pasted:
+                        contents_to_send.append(types.Part.from_text(text=f"Job Description: {st.session_state.job_description_pasted}"))
+
+                    with st.spinner("🔍 Thinking..."):
+                        response = st.session_state.chat.send_message(contents_to_send)
+                    
+                    full_response = response.text if hasattr(response, "text") else str(response)
+                    st.markdown(full_response)
+                except Exception as e:
+                    full_response = f"❌ Error from Gemini: {e}"
+                    st.error(full_response)
                 
-                full_response = response.text if hasattr(response, "text") else str(response)
-                st.markdown(full_response)
-            except Exception as e:
-                full_response = f"❌ Error from Gemini: {e}"
-                st.error(full_response)
-            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+                st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
 
 # Footer
 st.markdown(
