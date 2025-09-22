@@ -36,9 +36,9 @@ st.set_page_config(
 
 try:
     st.image(
-        Image.open("Bot1.png"),
-        caption="Bot Created by GommaBelt (2025)",
-        use_column_width=True
+    Image.open("Bot1.png"),
+    caption="Bot Created by GommaBelt (2025)",
+    width=340
     )
 except Exception as e:
     st.error(f"Error loading image: {e}")
