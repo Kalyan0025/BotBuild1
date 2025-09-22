@@ -266,7 +266,7 @@ def _ensure_files_active(files, max_wait_s: float = 12.0):
         if any_processing:
             time.sleep(0.6)
           
-if user_prompt := st.chat_input("Upload your Master resume and Job Description to get started"):
+if user_prompt := st.chat_input("Start here: Master Resume + JD"):
     # Record & show user message
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
     with st.chat_message("user", avatar="👤"):  # <-- This emoji can be changed
