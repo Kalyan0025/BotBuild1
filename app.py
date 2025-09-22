@@ -38,7 +38,7 @@ st.set_page_config(page_title="ReadySetRole", # <-- Change this also but always 
                     initial_sidebar_state="expanded") # <-- will expand the sidebar automatically
 
 # --- Centered Logo and Title Section ---
-# Create a single column to center the content
+# Create three columns to center the content
 left_col, center_col, right_col = st.columns([1, 2, 1])
 
 with center_col:
@@ -99,8 +99,10 @@ except Exception as e:
 
 # Ensure chat history and files state stores exist
 st.session_state.setdefault("chat_history", [])
-# Each entry: {"name": str, "size": int, "mime": str, "file": google.genai.types.File}
 st.session_state.setdefault("uploaded_files", [])
+st.session_state.setdefault("master_resume_uploaded", False)
+st.session_state.setdefault("job_description_pasted", False)
+st.session_state.setdefault("job_description_text", "")
 
 # --- Sidebar ----------------------------------------
 with st.sidebar:
@@ -131,7 +133,10 @@ with st.sidebar:
     # ---- Clear Chat button ----
     if st.button("🧹 Clear chat", use_container_width=True, help="Clear messages and reset chat context"):
         st.session_state.chat_history.clear()
-        # Recreate a fresh chat session (resets server-side history)
+        st.session_state.uploaded_files.clear()
+        st.session_state.master_resume_uploaded = False
+        st.session_state.job_description_pasted = False
+        st.session_state.job_description_text = ""
         st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
         st.toast("Chat cleared.")
         st.rerun()
@@ -152,20 +157,17 @@ with st.sidebar:
 
         # Helper: Upload one file to Gemini Files API
         def _upload_to_gemini(u):
-            # Infer MIME type
             mime = u.type or (mimetypes.guess_type(u.name)[0] or "application/octet-stream")
             data = u.getvalue()
-            # Upload with bytes buffer; SDK infers metadata, we provide mime
             gfile = client.files.upload(
                 file=io.BytesIO(data),
                 config=types.UploadFileConfig(mime_type=mime)
             )
-            # Persist minimal metadata (avoid keeping the raw bytes in memory)
             return {
                 "name": u.name,
                 "size": len(data),
                 "mime": mime,
-                "file": gfile,        # has .name, .uri, .mime_type, .state, .expiration_time
+                "file": gfile,
             }
 
         # Add newly selected files (respect cap of 5)
@@ -173,7 +175,6 @@ with st.sidebar:
             slots_left = max(0, 5 - len(st.session_state.uploaded_files))
             newly_added = []
             for u in uploads[:slots_left]:
-                # Skip duplicates by (name, size)
                 already = any((u.name == f["name"] and u.size == f["size"]) for f in st.session_state.uploaded_files)
                 if already:
                     continue
@@ -185,9 +186,10 @@ with st.sidebar:
                     st.error(f"File upload failed for **{u.name}**: {e}")
 
             if newly_added:
+                st.session_state.master_resume_uploaded = True
                 st.toast(f"Uploaded: {', '.join(newly_added)}")
+                st.rerun()
             
-        # Show current file list with remove buttons
         st.markdown("**Attached files**")
         if st.session_state.uploaded_files:
             for idx, meta in enumerate(st.session_state.uploaded_files):
@@ -205,12 +207,12 @@ with st.sidebar:
                         except Exception:
                             pass
                         st.session_state.uploaded_files.pop(idx)
+                        st.session_state.master_resume_uploaded = False
                         st.rerun()
             st.caption(f"{5 - len(st.session_state.uploaded_files)} slots remaining.")
         else:
             st.caption("No files attached.")
 
-    #show Stored files on Google (server side) --
     with st.expander("🛠️ Developer: See and Delete all files stored on Google server", expanded=False):
         try:
             files_list = client.files.list()
@@ -222,11 +224,7 @@ with st.sidebar:
                     exp_str = exp if exp else "?"
                     size = getattr(f, "size_bytes", None)
                     size_str = f"{size/1024:.1f} KB" if size else "?"
-                    st.write(
-                        f"• **{f.name}** "
-                        f"({f.mime_type}, {size_str})  "
-                        f"Expires: {exp_str}"
-                    )
+                    st.write(f"• **{f.name}** ({f.mime_type}, {size_str}) Expires: {exp_str}")
                 if st.button("🗑️ Delete all files", use_container_width=True):
                     failed = []
                     for f in files_list:
@@ -246,14 +244,12 @@ with st.sidebar:
 # Enable chat container and chat set-up
 #######################################
 with st.container():
-    # Replay chat history
     for msg in st.session_state.chat_history:
-        avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"  # <-- These emoji's can be changed
+        avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["parts"])
 
 def _ensure_files_active(files, max_wait_s: float = 12.0):
-    """Poll the Files API for PROCESSING files until ACTIVE or timeout."""
     deadline = time.time() + max_wait_s
     any_processing = True
     while any_processing and time.time() < deadline:
@@ -269,45 +265,67 @@ def _ensure_files_active(files, max_wait_s: float = 12.0):
                     pass
         if any_processing:
             time.sleep(0.6)
-            
-if user_prompt := st.chat_input("Start here: Master Resume + JD"):
-    # Record & show user message
-    st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
-    with st.chat_message("user", avatar="👤"):  # <-- This emoji can be changed
-        st.markdown(user_prompt)
 
-    # Send message and display full response (no streaming)
-    with st.chat_message("assistant", avatar=":material/robot_2:"):  # <-- This bot image can be replaced with an emoji
-        try:
-            # If files are attached, ensure they're ready and include them in this turn
-            contents_to_send = None
-            if st.session_state.uploaded_files:
-                _ensure_files_active(st.session_state.uploaded_files)
+if not st.session_state.master_resume_uploaded:
+    st.info("Upload your master resume to begin.")
+else:
+    jd_input = st.text_area("Paste your Job Description (JD) here:", height=300)
+    
+    if st.button("Submit JD"):
+        st.session_state.job_description_text = jd_input
+        st.session_state.job_description_pasted = True
+        st.rerun()
+
+if st.session_state.master_resume_uploaded and st.session_state.job_description_pasted:
+    user_prompt = f"Here is my master resume: [attached files]. Here is the job description: {st.session_state.job_description_text}"
+    
+    if "initial_prompt_sent" not in st.session_state:
+        st.session_state.chat_history.append({"role": "user", "parts": "Initial files and JD submitted. Begin processing."})
+        st.session_state.initial_prompt_sent = True
+        
+        with st.chat_message("user", avatar="👤"):
+            st.markdown("Processing files and JD. Stand by...")
+    
+        with st.chat_message("assistant", avatar=":material/robot_2:"):
+            try:
                 contents_to_send = [
                     types.Part.from_text(text=user_prompt)
                 ] + [meta["file"] for meta in st.session_state.uploaded_files]
-
-            # Show spinner with message
-            with st.spinner("🔍 Thinking about what I know about this ..."):
-                if contents_to_send is None:
-                    # No files attached: keep original behavior
-                    response = st.session_state.chat.send_message(user_prompt)
-                else:
-                    # Files attached: pass a parts list (text + File objects)
+                
+                with st.spinner("🔍 Analyzing documents to create your tailored resume..."):
                     response = st.session_state.chat.send_message(contents_to_send)
+                
+                full_response = response.text if hasattr(response, "text") else str(response)
+                st.markdown(full_response)
+                
+            except Exception as e:
+                full_response = f"❌ Error from Gemini: {e}"
+                st.error(full_response)
+                
+            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+            st.rerun()
 
-            # Extract the full response text
-            full_response = response.text if hasattr(response, "text") else str(response)
+    # Continue the conversation based on user's new inputs after the initial processing
+    if user_prompt_follow_up := st.chat_input("Ask for a score, changes, or more boosters:"):
+        st.session_state.chat_history.append({"role": "user", "parts": user_prompt_follow_up})
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(user_prompt_follow_up)
+            
+        with st.chat_message("assistant", avatar=":material/robot_2:"):
+            try:
+                contents_to_send = [
+                    types.Part.from_text(text=user_prompt_follow_up)
+                ] + [meta["file"] for meta in st.session_state.uploaded_files]
 
-            # Display the full response
-            st.markdown(full_response)
-
-        except Exception as e:
-            full_response = f"❌ Error from Gemini: {e}"
-            st.error(full_response)
-
-        # Record assistant reply
-        st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+                with st.spinner("🔍 Thinking..."):
+                    response = st.session_state.chat.send_message(contents_to_send)
+                
+                full_response = response.text if hasattr(response, "text") else str(response)
+                st.markdown(full_response)
+            except Exception as e:
+                full_response = f"❌ Error from Gemini: {e}"
+                st.error(full_response)
+            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
 
 # Footer
 st.markdown(
