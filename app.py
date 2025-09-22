@@ -26,10 +26,11 @@ from PIL import Image   # <- Python code to display images
 import io
 import time
 import mimetypes
+import uuid
 
 # --- Google GenAI Models import ---------------------------
 from google import genai
-from google.genai import types   # <--Allows for tool use, like Google Search
+from google.genai import types   # <--Allows for tool use
 # ----------------------------------------------------
 
 # Streamlit page setup
@@ -55,7 +56,7 @@ st.markdown("<h1 style='text-align: center;'>YOUR BOT'S NAME</h1>", unsafe_allow
 # --- Helper -----------------------------------------
 def load_developer_prompt() -> str:
     try:
-        with open("identity.txt") as f:
+        with open("identity.txt") as f:  # rename here if your file is "instruction.txt"
             return f.read()
     except FileNotFoundError:
         st.warning("⚠️ 'identity.txt' not found. Using default prompt.")
@@ -82,17 +83,13 @@ try:
     # System instructions
     system_instructions = load_developer_prompt()
 
-    # Optional Google Search Tool (guarded for SDK changes)
-    tools = []
-    try:
-        tools.append(types.Tool(google_search=types.GoogleSearch()))
-    except Exception:
-        tools = []
+    # Disable optional search tool to reduce variability
+    tools = None  # keep None for simplest, most compatible config
 
     # Avoid unstable thinking_config; use conservative settings
     generation_cfg = types.GenerateContentConfig(
         system_instruction=system_instructions,
-        tools=tools if tools else None,
+        tools=tools,
         temperature=0.7,
         max_output_tokens=2048,
     )
@@ -109,6 +106,10 @@ except Exception as e:
 st.session_state.setdefault("chat_history", [])
 # Each entry: {"name": str, "size": int, "mime": str, "file": google.genai.types.File}
 st.session_state.setdefault("uploaded_files", [])
+# Idempotency guards for repeated replies on reruns
+st.session_state.setdefault("last_processed_key", None)
+st.session_state.setdefault("pending_prompt", None)
+st.session_state.setdefault("turn_key", None)
 
 # --- Sidebar ----------------------------------------
 with st.sidebar:
@@ -120,11 +121,11 @@ with st.sidebar:
         selected_model = st.selectbox(
             "Choose a model:",
             options=[
-                "gemini-2.5-pro",
                 "gemini-2.5-flash",
+                "gemini-2.5-pro",
                 "gemini-2.5-flash-lite"
             ],
-            index=2,
+            index=0,
             label_visibility="visible",
             help="Response Per Day Limits: Pro = 100, Flash = 250, Flash-lite = 1000)"
         )
@@ -146,6 +147,9 @@ with st.sidebar:
     # ---- Clear Chat button ----
     if st.button("🧹 Clear chat", use_container_width=True, help="Clear messages and reset chat context"):
         st.session_state.chat_history.clear()
+        st.session_state.pending_prompt = None
+        st.session_state.turn_key = None
+        st.session_state.last_processed_key = None
         st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
         st.toast("Chat cleared.")
         st.rerun()
@@ -261,7 +265,7 @@ with st.container():
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["parts"])
 
-def _ensure_files_active(files, max_wait_s: float = 12.0):
+def _ensure_files_active(files, max_wait_s: float = 6.0):
     """Poll the Files API for PROCESSING files until ACTIVE or timeout."""
     deadline = time.time() + max_wait_s
     while time.time() < deadline:
@@ -283,19 +287,23 @@ def _ensure_files_active(files, max_wait_s: float = 12.0):
             break
         time.sleep(0.6)
 
+# Capture input without immediately processing (prevents repeated replies on reruns)
 if user_prompt := st.chat_input("Message 'your bot name'…"):
-    # Record & show user message
+    st.session_state.turn_key = str(uuid.uuid4())
+    st.session_state.pending_prompt = user_prompt
+
+# Process exactly once per unique turn_key
+if st.session_state.get("pending_prompt") and st.session_state.get("turn_key") != st.session_state.get("last_processed_key"):
+    user_prompt = st.session_state.pending_prompt
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
     with st.chat_message("user", avatar="👤"):
         st.markdown(user_prompt)
 
-    # Send message and display full response (no streaming)
     with st.chat_message("assistant", avatar=":material/robot_2:"):
         try:
-            # If files are attached, ensure they're ready and include them in this turn
             contents_to_send = None
             if st.session_state.uploaded_files:
-                _ensure_files_active(st.session_state.uploaded_files)
+                _ensure_files_active(st.session_state.uploaded_files, max_wait_s=6.0)
                 contents_to_send = [types.Part.from_text(text=user_prompt)]
                 contents_to_send += [
                     meta["file"] for meta in st.session_state.uploaded_files if meta.get("file")
@@ -311,18 +319,17 @@ if user_prompt := st.chat_input("Message 'your bot name'…"):
                     st.warning(f"Retrying without files due to: {e}")
                     response = st.session_state.chat.send_message(user_prompt)
 
-            # Extract the full response text
             full_response = response.text if hasattr(response, "text") else str(response)
-
-            # Display the full response
             st.markdown(full_response)
 
         except Exception as e:
             full_response = f"❌ Error from Gemini: {e}"
             st.error(full_response)
 
-        # Record assistant reply
-        st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+    # Record assistant reply and mark this turn processed
+    st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+    st.session_state.last_processed_key = st.session_state.turn_key
+    st.session_state.pending_prompt = None
 
 # Footer
 st.markdown(
