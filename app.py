@@ -32,37 +32,30 @@ from google import genai
 from google.genai import types   # <--Allows for tool use, like Google Search
 # ----------------------------------------------------
 
-# ===== ReadySetRole config (edit these) ==================
-BOT_NAME = "ReadySetRole"
-CREATOR = "Kalyan Kadavanti Sudhakar"
-PROMPT_PATH = "identity.txt"            # keep using your existing file
-DEFAULT_MODEL = "gemini-2.5-pro"        # pro follows longer prompts best
-# ========================================================
-
 # Streamlit page setup <--this should be the first streamlit command after imports
-st.set_page_config(page_title=BOT_NAME,  # name on the browser tab
-                   layout="centered",
-                   initial_sidebar_state="expanded")
+st.set_page_config(page_title="My Bot",  # <-- Change this also but always keep " " this will be the name on the browser tag
+                   layout="centered",    # <--- options are "centered", "wide", or nothing for default
+                   initial_sidebar_state="expanded")  # <-- will expand the sidebar automatically
 
 # Load and display a custom image for your bot
 try:
-    st.image(Image.open("Bot.png"),
-             caption=f"{BOT_NAME} by {CREATOR} (2025)",
+    st.image(Image.open("Bot.png"),  # <-- make sure your image is called this or change it to be the same
+             caption="Bot Created by YOUR NAME (2025)",  # <-- change with your bot name and your own name
              use_container_width=True)
 except Exception as e:
     st.error(f"Error loading image: {e}")
 
 # Bot Title
-st.markdown(f"<h1 style='text-align: center;'>{BOT_NAME}</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align: center;'>YOUR BOT'S NAME</h1>", unsafe_allow_html=True)
 
 # --- Helper -----------------------------------------
 def load_developer_prompt() -> str:
     try:
-        with open(PROMPT_PATH, "r", encoding="utf-8") as f:
+        with open("identity.txt") as f:  # <-- Make sure your rules.text name matches this exactly
             return f.read()
     except FileNotFoundError:
-        st.warning(f"⚠️ '{PROMPT_PATH}' not found. Using default prompt.")
-        return (f"You are a helpful assistant named {BOT_NAME}, created by {CREATOR}. "
+        st.warning("⚠️ 'identity.txt' not found. Using default prompt.")
+        return ("You are a helpful assistant. "
                 "Be friendly, engaging, and provide clear, concise responses.")
 
 def human_size(n: int) -> str:
@@ -75,51 +68,40 @@ def human_size(n: int) -> str:
 # --- Gemini configuration ---------------------------
 try:
     # Activate Gemini GenAI model and access your API key in streamlit secrets
-    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])  # make sure GEMINI_API_KEY is set in Streamlit secrets
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])  # <-- make sure you have your google API key (from Google AI Studio) and put it in streamlit secrets as GEMINI_API_KEY = "yourapikey" use " "
 
     # System instructions
     system_instructions = load_developer_prompt()
 
-    # Enable Google Search Tool (optional)
-    search_tool = types.Tool(google_search=types.GoogleSearch())
+    # Enable Google Search Tool
+    search_tool = types.Tool(google_search=types.GoogleSearch())  # <-- optional Google Search tool
 
     # Generation configuration for every turn
     generation_cfg = types.GenerateContentConfig(
         system_instruction=system_instructions,
         tools=[search_tool],
-        thinking_config=types.ThinkingConfig(thinking_budget=-1),  # dynamic thinking
+        thinking_config=types.ThinkingConfig(thinking_budget=-1), # <--- set to dynamic thinking (model decides whether to use thinking based on context)
         temperature=1.0,
         max_output_tokens=2048,
     )
-
+    
 except Exception as e:
     st.error(
         "Error initialising the Gemini client. "
         "Check your `GEMINI_API_KEY` in Streamlit → Settings → Secrets."
-        f" Details: {e}"
+        f"Details: {e}"
     )
     st.stop()
 
 # Ensure chat history and files state stores exist
 st.session_state.setdefault("chat_history", [])
+# Each entry: {"name": str, "size": int, "mime": str, "file": google.genai.types.File}
 st.session_state.setdefault("uploaded_files", [])
-st.session_state.setdefault("bootstrapped", False)  # <- to show the first assistant message once
-
-# ---------- First assistant message (bot makes the first move) ----------
-if not st.session_state.bootstrapped:
-    first_msg = (
-        f"Hi! I’m **{BOT_NAME}** by **{CREATOR}**.\n\n"
-        "Upload/paste your **Master Resume** (I’ll remember it in this session), "
-        "and paste the **Job Description (JD)**. Then send both here to get "
-        "**Pre-Score → tailored resume + cover letter → Post-Score**."
-    )
-    st.session_state.chat_history.append({"role": "assistant", "parts": first_msg})
-    st.session_state.bootstrapped = True
 
 # --- Sidebar ----------------------------------------
 with st.sidebar:
     st.title("⚙️ Controls")
-    st.markdown("**About:** Tailor a resume & cover letter to each JD. ATS-safe. No fabrication.")
+    st.markdown("### About: Briefly describe your bot here for users.")
 
     # Model Selection Expander (testing different models)
     with st.expander(":material/text_fields_alt: Model Selection", expanded=True):
@@ -130,9 +112,9 @@ with st.sidebar:
                 "gemini-2.5-flash",
                 "gemini-2.5-flash-lite"
             ],
-            index=0,  # Default to gemini-2.5-pro
+            index=2,  # Default to gemini-2.5-flash-lite
             label_visibility="visible",
-            help="Pro follows longer prompts best; Flash/Flash-lite are faster."
+            help="Response Per Day Limits: Pro = 100, Flash = 250, Flash-lite = 1000)"
         )
         st.caption(f"Selected: **{selected_model}**")
 
@@ -145,7 +127,6 @@ with st.sidebar:
     # ---- Clear Chat button ----
     if st.button("🧹 Clear chat", use_container_width=True, help="Clear messages and reset chat context"):
         st.session_state.chat_history.clear()
-        st.session_state.bootstrapped = False
         # Recreate a fresh chat session (resets server-side history)
         st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
         st.toast("Chat cleared.")
@@ -154,8 +135,9 @@ with st.sidebar:
     # ---- File Upload (Files API) ----
     with st.expander(":material/attach_file: Files (PDF/TXT/DOCX)", expanded=True):
         st.caption(
-            "Attach up to **5** files. They’ll be uploaded once and reused across turns. "
-            "Files are stored temporarily (≈48 hours) in Google’s File store."
+            "Attach up to **5** files. They’ll be uploaded once and reused across turns.  "
+            "Files are stored temporarily (≈48 hours) in Google’s File store and count toward "
+            "your 20 GB storage cap until deleted (clicking ✖) or expired."
         )
         uploads = st.file_uploader(
             "Upload files",
@@ -208,18 +190,18 @@ with st.sidebar:
                 left, right = st.columns([0.88, 0.12])
                 with left:
                     st.write(
-                        f"• {meta['name']} "
+                        f"• {meta['name']}"
                         f"<small>{human_size(meta['size'])} · {meta['mime']}</small>",
                         unsafe_allow_html=True
                     )
                 with right:
                     if st.button("✖", key=f"remove_{idx}", help="Remove this file"):
-                        try:
-                            client.files.delete(name=meta['file'].name)
-                        except Exception:
-                            pass
-                        st.session_state.uploaded_files.pop(idx)
-                        st.rerun()
+                      try:
+                        client.files.delete(name=meta['file'].name)
+                      except Exception:
+                          pass
+                      st.session_state.uploaded_files.pop(idx)
+                      st.rerun()
             st.caption(f"{5 - len(st.session_state.uploaded_files)} slots remaining.")
         else:
             st.caption("No files attached.")
@@ -283,26 +265,32 @@ def _ensure_files_active(files, max_wait_s: float = 12.0):
                     pass
         if any_processing:
             time.sleep(0.6)
-
-# ---------- Chat input ----------
-placeholder = "Paste the JD and (optionally) attach your Master Resume to tailor now"
-if user_prompt := st.chat_input(placeholder):
+          
+if user_prompt := st.chat_input("Message 'your bot name'…"):
     # Record & show user message
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
-    with st.chat_message("user", avatar="👤"):
+    with st.chat_message("user", avatar="👤"):  # <-- This emoji can be changed
         st.markdown(user_prompt)
 
     # Send message and display full response (no streaming)
-    with st.chat_message("assistant", avatar=":material/robot_2:"):
+    with st.chat_message("assistant", avatar=":material/robot_2:"):  # <-- This bot image can be replaced with an emoji
         try:
             # If files are attached, ensure they're ready and include them in this turn
+            contents_to_send = None
             if st.session_state.uploaded_files:
                 _ensure_files_active(st.session_state.uploaded_files)
-                # IMPORTANT: send plain strings + file objects (no Part.from_text)
-                contents_to_send = [user_prompt] + [meta["file"] for meta in st.session_state.uploaded_files]
-                response = st.session_state.chat.send_message(contents_to_send)
-            else:
-                response = st.session_state.chat.send_message(user_prompt)
+                contents_to_send = [
+                    types.Part.from_text(text=user_prompt)
+                ] + [meta["file"] for meta in st.session_state.uploaded_files]
+
+            # Show spinner with message
+            with st.spinner("🔍 Thinking about what I know about this ..."):
+                if contents_to_send is None:
+                    # No files attached: keep original behavior
+                    response = st.session_state.chat.send_message(user_prompt)
+                else:
+                    # Files attached: pass a parts list (text + File objects)
+                    response = st.session_state.chat.send_message(contents_to_send)
 
             # Extract the full response text
             full_response = response.text if hasattr(response, "text") else str(response)
