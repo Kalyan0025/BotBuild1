@@ -40,7 +40,7 @@ st.set_page_config(page_title="ReadySetRole",  # <-- Change this also but always
 # Load and display a custom image for your bot
 try:
     st.image(Image.open("Bot.png"),  # <-- make sure your image is called this or change it to be the same
-             caption="Bot Created by GommaBelt)",  # <-- change with your bot name and your own name
+             caption="Bot Created by GommaBelt",  # <-- change with your bot name and your own name
              use_container_width=True)
 except Exception as e:
     st.error(f"Error loading image: {e}")
@@ -266,7 +266,7 @@ def _ensure_files_active(files, max_wait_s: float = 12.0):
         if any_processing:
             time.sleep(0.6)
           
-if user_prompt := st.chat_input("Message 'your bot name'…"):
+if user_prompt := st.chat_input("Message 'Ready Set Role'…"):
     # Record & show user message
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
     with st.chat_message("user", avatar="👤"):  # <-- This emoji can be changed
