@@ -104,25 +104,42 @@ def too_similar(a: str, b: str, threshold: float = 0.90) -> bool:
     return ratio >= threshold
 
 
-# ---------------------------
-# Sidebar (NO uploads here)
-# ---------------------------
-with st.sidebar:
-    st.title("⚙️ Controls")
-    st.caption("Simple, non-repeating Gemini bot for resume tailoring.")
+def extract_text_from_response(resp) -> str:
+    """Robustly extract text across SDK variants; avoid printing raw Candidate objects."""
+    try:
+        # Newer SDKs
+        t = getattr(resp, "text", None)
+        if t:
+            return t
+        # Candidates/parts path
+        out = []
+        candidates = getattr(resp, "candidates", None) or []
+        for c in candidates:
+            content = getattr(c, "content", None)
+            parts = getattr(content, "parts", None) or []
+            for p in parts:
+                pt = getattr(p, "text", None)
+                if pt:
+                    out.append(pt)
+        if out:
+            return "
+".join(out).strip()
+    except Exception:
+        pass
+    return ""
 
     st.markdown("### Model")
     model_name = st.selectbox(
         "Choose a model",
         ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
-        index=0,
+        index=1,
     )
 
     st.markdown("### Generation Settings")
     temperature = st.slider("temperature", 0.0, 1.0, 0.2, 0.05)
     top_p = st.slider("top_p", 0.0, 1.0, 0.9, 0.05)
     top_k = st.slider("top_k", 1, 100, 40, 1)
-    max_tokens = st.number_input("max_output_tokens", min_value=256, max_value=4096, value=1536, step=64)
+    max_tokens = st.number_input("max_output_tokens", min_value=256, max_value=4096, value=3072, step=64)
     concise_mode = st.toggle("Concise mode (short answers)", value=True, help="Adds extra brevity hints to the system instruction")
 
     st.divider()
@@ -255,9 +272,9 @@ with jd_container:
                 """
 Run QuickScore on the provided RESUME and JD, then continue as follows:
 1) Output PRE-SCORE with subscores (skills_fit, experience_fit, education_fit, ats_keywords_coverage) in a clear block.
-2) List KEYWORD PACKS (numbered 1..N) with short labels and predicted score lift.
+2) List up to 4 KEYWORD PACKS (numbered 1..N) with short labels and predicted score lift.
 3) End with: 'Reply with 1,2,3 or 0 for all to apply.'
-Rules: No fabrication; use only evidence from the resume + JD. Keep it concise and ATS-safe.
+Constraints: Keep total output under 500 words. No fabrication; use only resume + JD evidence. ATS-safe formatting.
                 """
             )
             parts = [types.Part.from_text(text=command)]
@@ -278,7 +295,7 @@ Rules: No fabrication; use only evidence from the resume + JD. Keep it concise a
                 with st.chat_message("assistant", avatar=":material/robot_2:"):
                     with st.spinner("Scoring resume ↔ JD and preparing keyword packs…"):
                         response = st.session_state.chat.send_message(parts)
-                    full_response = getattr(response, "text", None) or (str(response) if response else "[No content returned]")
+                    full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
                     if too_similar(st.session_state.last_assistant_text, full_response):
                         full_response = (
                             "I've already proposed packs above. Reply with numbers (e.g., 1,3) or 0 to apply all."
@@ -353,7 +370,7 @@ if user_prompt:
             with st.chat_message("assistant", avatar=":material/robot_2:"):
                 with st.spinner("Applying your selections and generating outputs…"):
                     response = st.session_state.chat.send_message(parts)
-                full_response = getattr(response, "text", None) or (str(response) if response else "[No content returned]")
+                full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
                 if too_similar(st.session_state.last_assistant_text, full_response):
                     full_response = "Outputs generated above. Want me to export a plain-text file?"
                 st.markdown(full_response)
@@ -371,7 +388,7 @@ if user_prompt:
             with st.chat_message("assistant", avatar=":material/robot_2:"):
                 with st.spinner("Thinking…"):
                     response = st.session_state.chat.send_message(parts)
-                full_response = getattr(response, "text", None) or (str(response) if response else "[No content returned]")
+                full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
                 if too_similar(st.session_state.last_assistant_text, full_response):
                     full_response = "I've covered that above. Want me to export, or propose boosters?"
                 st.markdown(full_response)
