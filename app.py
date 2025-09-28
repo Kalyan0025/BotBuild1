@@ -1,6 +1,6 @@
 # ReadySetRole — Simple Gemini Chatbot (Streamlit)
 # Deterministic flow with stage tracking; robust response parsing; resume persisted for session
-# Two-step "Apply" to avoid truncation: (A) Resume only → (B) Post-Score + Letter + Change Log + Options
+# Two-step Apply: (A) Resume only → (B) Post-Score + Letter + Change Log + Options
 # License note per template:
 # "This code uses portions of code developed by Ronald A. Beghetto for a course taught at Arizona State University."
 
@@ -190,6 +190,7 @@ st.session_state.setdefault("resume_text", "")      # optional pasted text
 st.session_state.setdefault("jd_text_temp", "")
 st.session_state.setdefault("last_jd_meta", None)   # remember most recent JD file
 st.session_state.setdefault("awaiting_pack_selection", False)
+st.session_state.setdefault("awaiting_micro_pack_selection", False)
 st.session_state.setdefault("awaiting_next_options", False)
 st.session_state.setdefault("last_apply_output", "")
 
@@ -249,6 +250,7 @@ with resume_container:
             st.session_state["resume_meta"] = None
             st.session_state["resume_text"] = ""
             st.session_state["awaiting_pack_selection"] = False
+            st.session_state["awaiting_micro_pack_selection"] = False
             st.session_state["awaiting_next_options"] = False
             st.session_state["last_apply_output"] = ""
             st.rerun()
@@ -270,7 +272,7 @@ with jd_container:
                 "Run QuickScore on the provided RESUME and JD, then continue as follows:\n"
                 "1) Output PRE-SCORE with subscores (skills_fit, experience_fit, education_fit, ats_keywords_coverage) in a clear block.\n"
                 "2) List up to 4 KEYWORD PACKS (numbered 1..N) with short labels and predicted score lift.\n"
-                "3) End with: 'Reply with 1,2,3 or 0 for all to apply.'\n"
+                "3) End with: 'Reply with 1,2,3,4 or 0 for all to apply.'\n"
                 "Constraints: Keep total output under 500 words. No fabrication; use only resume + JD evidence. ATS-safe formatting."
             )
             parts = [types.Part.from_text(text=command)]
@@ -299,6 +301,7 @@ with jd_container:
                 st.session_state.last_assistant_text = full_response
                 # Expect pack selection next
                 st.session_state["awaiting_pack_selection"] = True
+                st.session_state["awaiting_micro_pack_selection"] = False
                 st.session_state["awaiting_next_options"] = False
             except Exception as e:
                 st.error(f"❌ Gemini error: {e}")
@@ -330,9 +333,9 @@ for msg in st.session_state.chat_history:
         st.markdown(msg["parts"])  # plain text
 
 # ---------------------------
-# Chat input — packs → apply → next options
+# Chat input — packs → apply → next options (inc. micro-packs + 0=next JD)
 # ---------------------------
-user_prompt = st.chat_input("Reply with packs (e.g., 1,3 or 0 for all). After apply: 1=boosters, 2=next JD, 3=export.")
+user_prompt = st.chat_input("Reply with packs (e.g., 1,3 or 0 for all). After apply: 1=refine with micro-packs, 0=next JD, 2=boosters, 3=export.")
 if user_prompt:
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
     with st.chat_message("user", avatar="👤"):
@@ -345,10 +348,10 @@ if user_prompt:
         st.stop()
 
     pack_match = re.fullmatch(r"\s*0\s*|\s*(\d+\s*(,\s*\d+\s*)*)\s*", user_prompt)
-    option_match = re.fullmatch(r"\s*[123]\s*", user_prompt)
+    option_match = re.fullmatch(r"\s*[0123]\s*", user_prompt)
 
     try:
-        # A) APPLY PACKS (only if we are expecting them) — TWO-STEP TO AVOID TRUNCATION
+        # A) APPLY PACKS (initial packs)
         if st.session_state.get("awaiting_pack_selection") and pack_match:
             selection = user_prompt.strip()
 
@@ -382,7 +385,7 @@ if user_prompt:
                 "3) Concise evidence-based cover letter (180–250 words). "
                 "4) Short Change Log (before→after bullets). "
                 "At the very end, print on separate lines: NEW MATCH %: <overall>\n"
-                "NEXT OPTIONS: [1] Suggest minor boosters (no new packs), [2] Accept & move to next JD, [3] Export .txt. "
+                "NEXT OPTIONS: [1] Refine with targeted micro-packs, [0] Next JD, [2] Minor boosters, [3] Export .txt. "
                 "Do NOT repeat the resume and do NOT propose new keyword packs."
             )
             parts_b = [types.Part.from_text(text=apply_cmd_b)]
@@ -401,19 +404,55 @@ if user_prompt:
                 rest = extract_text_from_response(resp_b) or "[Details missing]"
                 st.markdown(rest)
 
-            # Save combined output for export
             st.session_state["last_apply_output"] = (resume_only.rstrip() + "\n\n" + rest.lstrip()).strip()
-
-            # Move to next-options phase
             st.session_state["awaiting_pack_selection"] = False
+            st.session_state["awaiting_micro_pack_selection"] = False
             st.session_state["awaiting_next_options"] = True
             st.session_state["last_assistant_text"] = st.session_state["last_apply_output"]
             st.session_state.chat_history.append({"role": "assistant", "parts": st.session_state["last_apply_output"]})
 
-        # B) NEXT OPTIONS (after apply): 1/2/3
+        # B) NEXT OPTIONS (after apply): 1=micropacks, 0=next JD, 2=boosters, 3=export
         elif st.session_state.get("awaiting_next_options") and option_match:
             choice = option_match.group(0).strip()
             if choice == "1":
+                # Propose targeted micro-packs (narrow, evidenced terms)
+                micro_cmd = (
+                    "SuggestPacks(): Propose 1–3 narrowly scoped MICRO PACKS with exact phrasing from the JD that are safely supported by the resume evidence. "
+                    "Each pack must include 2–5 precise tokens/phrases and a small predicted score lift (+2–6%). "
+                    "Be cautious: exclude anything not evidenced. Avoid repeating earlier packs. "
+                    "End with: 'Reply with 1,2 or 0 to apply all micro-packs.'"
+                )
+                parts = [types.Part.from_text(text=micro_cmd)]
+                if st.session_state.get("resume_text"):
+                    parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+                if st.session_state.get("resume_meta"):
+                    parts.append(st.session_state["resume_meta"]["file"])  # resume file
+                if st.session_state.get("jd_text_temp"):
+                    parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
+                if st.session_state.get("last_jd_meta"):
+                    parts.append(st.session_state["last_jd_meta"]["file"])  # JD file
+                with st.chat_message("assistant", avatar=":material/robot_2:"):
+                    with st.spinner("Gathering micro-packs…"):
+                        response = st.session_state.chat.send_message(parts)
+                    full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching models]"
+                    st.markdown(full_response)
+                st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+                st.session_state.last_assistant_text = full_response
+                st.session_state["awaiting_next_options"] = False
+                st.session_state["awaiting_micro_pack_selection"] = True
+
+            elif choice == "0":
+                # Next JD (reset JD inputs but keep resume)
+                with st.chat_message("assistant", avatar=":material/robot_2:"):
+                    st.markdown("Upload/paste the **next JD** — I’ll reuse your master resume on file.")
+                st.session_state.chat_history.append({"role": "assistant", "parts": "Proceed with next JD."})
+                st.session_state.last_assistant_text = "Proceed with next JD."
+                st.session_state["awaiting_next_options"] = False
+                st.session_state["awaiting_micro_pack_selection"] = False
+                st.session_state["jd_text_temp"] = ""
+                st.session_state["last_jd_meta"] = None
+
+            elif choice == "2":
                 # Minor boosters — no new packs
                 boost_cmd = (
                     "BoostScore(): Suggest 3–6 minor booster edits to the tailored resume above without proposing new keyword packs. "
@@ -432,21 +471,11 @@ if user_prompt:
                 with st.chat_message("assistant", avatar=":material/robot_2:"):
                     with st.spinner("Preparing targeted boosters…"):
                         response = st.session_state.chat.send_message(parts)
-                    full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
+                    full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching models]"
                     st.markdown(full_response)
                 st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
                 st.session_state.last_assistant_text = full_response
                 st.session_state["awaiting_next_options"] = True
-
-            elif choice == "2":
-                # Accept & move to next JD
-                with st.chat_message("assistant", avatar=":material/robot_2:"):
-                    st.markdown("Great — upload/paste the **next JD** and I’ll reuse your master resume on file.")
-                st.session_state.chat_history.append({"role": "assistant", "parts": "Proceed with next JD."})
-                st.session_state.last_assistant_text = "Proceed with next JD."
-                st.session_state["awaiting_next_options"] = False
-                st.session_state["jd_text_temp"] = ""
-                st.session_state["last_jd_meta"] = None
 
             elif choice == "3":
                 with st.chat_message("assistant", avatar=":material/robot_2:"):
@@ -464,7 +493,60 @@ if user_prompt:
                 st.session_state.last_assistant_text = "Export option shown."
                 st.session_state["awaiting_next_options"] = True
 
-        # C) General follow-up
+        # C) APPLY MICRO-PACKS (numbers or 0 to apply all) after option 1
+        elif st.session_state.get("awaiting_micro_pack_selection") and pack_match:
+            selection = user_prompt.strip()
+
+            # STEP A for micro-packs
+            apply_cmd_a2 = (
+                "ApplySuggestions with the selected MICRO PACKS: '" + selection + "'. "
+                "Output ONLY the updated Tailored ATS-safe resume (plain text). End with: [END_RESUME]"
+            )
+            parts_a2 = [types.Part.from_text(text=apply_cmd_a2)]
+            if st.session_state.get("resume_text"):
+                parts_a2.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+            if st.session_state.get("resume_meta"):
+                parts_a2.append(st.session_state["resume_meta"]["file"])  # resume file
+            if st.session_state.get("jd_text_temp"):
+                parts_a2.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
+            if st.session_state.get("last_jd_meta"):
+                parts_a2.append(st.session_state["last_jd_meta"]["file"])  # JD file
+
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                with st.spinner("Applying micro-packs — updating resume…"):
+                    resp_a2 = st.session_state.chat.send_message(parts_a2)
+                resume_only2 = extract_text_from_response(resp_a2) or "[Resume content missing]"
+                st.markdown(resume_only2)
+
+            # STEP B for micro-packs
+            apply_cmd_b2 = (
+                "Now output only: POST-SCORE (overall 0–100) and Δ vs previous, plus a very short Change Log (3 bullets max). "
+                "At the end print: NEW MATCH %: <overall>\n"
+                "NEXT OPTIONS: [1] Refine with more micro-packs, [0] Next JD, [2] Minor boosters, [3] Export .txt."
+            )
+            parts_b2 = [types.Part.from_text(text=apply_cmd_b2)]
+            if st.session_state.get("resume_text"):
+                parts_b2.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+            if st.session_state.get("resume_meta"):
+                parts_b2.append(st.session_state["resume_meta"]["file"])  # resume file
+            if st.session_state.get("jd_text_temp"):
+                parts_b2.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
+            if st.session_state.get("last_jd_meta"):
+                parts_b2.append(st.session_state["last_jd_meta"]["file"])  # JD file
+
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                with st.spinner("Re-scoring and summarizing changes…"):
+                    resp_b2 = st.session_state.chat.send_message(parts_b2)
+                rest2 = extract_text_from_response(resp_b2) or "[Details missing]"
+                st.markdown(rest2)
+
+            st.session_state["last_apply_output"] = (resume_only2.rstrip() + "\n\n" + rest2.lstrip()).strip()
+            st.session_state["awaiting_micro_pack_selection"] = False
+            st.session_state["awaiting_next_options"] = True
+            st.session_state["last_assistant_text"] = st.session_state["last_apply_output"]
+            st.session_state.chat_history.append({"role": "assistant", "parts": st.session_state["last_apply_output"]})
+
+        # D) General follow-up
         else:
             parts = [types.Part.from_text(text=user_prompt)]
             if st.session_state.get("resume_text"):
@@ -478,9 +560,9 @@ if user_prompt:
             with st.chat_message("assistant", avatar=":material/robot_2:"):
                 with st.spinner("Thinking…"):
                     response = st.session_state.chat.send_message(parts)
-                full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
+                full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching models]"
                 if too_similar(st.session_state.last_assistant_text, full_response):
-                    full_response = "I've covered that above. Want boosters (1), accept & next JD (2), or export (3)?"
+                    full_response = "I've covered that above. Choose: 1=micro-packs, 0=next JD, 2=boosters, 3=export."
                 st.markdown(full_response)
             st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
             st.session_state.last_assistant_text = full_response
