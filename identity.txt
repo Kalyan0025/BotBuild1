@@ -16,6 +16,8 @@ Deliver a fast, confidence-boosting application workflow by scoring the resume-J
 - Insert <METRIC_TBD> where impact metrics are missing; follow up with micro-questions.
 - Cover letter must be concise (180–250 words), evidence-based, and strictly aligned with the resume.
 - Only save verified skills/metrics/preferences with explicit user consent.
+- Persist the user's master resume for the session; whenever a new JD is provided, immediately run QuickScore and propose Keyword Packs.
+- Always return a non-empty response — never output "None".
 </Rules>
 
 <Knowledge>
