@@ -1,5 +1,5 @@
 # ReadySetRole — Simple Gemini Chatbot (Streamlit)
-# Deterministic flow with stage tracking to avoid repeats; robust response parsing.
+# Deterministic flow with stage tracking; robust response parsing; resume persisted for session
 # License note per template:
 # "This code uses portions of code developed by Ronald A. Beghetto for a course taught at Arizona State University."
 
@@ -38,6 +38,7 @@ st.markdown(f"<div style='text-align:center;color:gray;font-size:12px'>{sub}</di
 # ---------------------------
 # Helpers
 # ---------------------------
+
 def human_size(n: int) -> str:
     for unit in ["B", "KB", "MB", "GB"]:
         if n < 1024.0:
@@ -98,7 +99,7 @@ def too_similar(a: str, b: str, threshold: float = 0.90) -> bool:
 
 
 def extract_text_from_response(resp) -> str:
-    """Robustly extract text across SDK variants."""
+    """Robustly extract text across SDK variants; avoid printing raw Candidate objects."""
     try:
         t = getattr(resp, "text", None)
         if t:
@@ -119,7 +120,7 @@ def extract_text_from_response(resp) -> str:
     return ""
 
 # ---------------------------
-# Sidebar (settings only)
+# Sidebar (settings only — no uploads)
 # ---------------------------
 with st.sidebar:
     st.title("⚙️ Controls")
@@ -136,10 +137,11 @@ with st.sidebar:
     temperature = st.slider("temperature", 0.0, 1.0, 0.2, 0.05)
     top_p = st.slider("top_p", 0.0, 1.0, 0.9, 0.05)
     top_k = st.slider("top_k", 1, 100, 40, 1)
-    max_tokens = st.number_input("max_output_tokens", 256, 4096, 3072, 64)
-    concise_mode = st.toggle("Concise mode (short answers)", True)
+    max_tokens = st.number_input("max_output_tokens", min_value=256, max_value=4096, value=3072, step=64)
+    concise_mode = st.toggle("Concise mode (short answers)", value=True, help="Adds extra brevity hints to the system instruction")
 
     st.divider()
+
     st.markdown("### System Instructions")
     instr_src = st.radio("Load instructions from:", ["identity.txt", "Paste inline"], index=1, horizontal=True)
     pasted = ""
@@ -185,7 +187,7 @@ st.session_state.setdefault("resume_text", "")      # optional pasted text
 
 # JD + flow state
 st.session_state.setdefault("jd_text_temp", "")
-st.session_state.setdefault("last_jd_meta", None)   # remember the most recent JD file
+st.session_state.setdefault("last_jd_meta", None)   # remember most recent JD file
 st.session_state.setdefault("awaiting_pack_selection", False)
 st.session_state.setdefault("awaiting_next_options", False)
 st.session_state.setdefault("last_apply_output", "")
@@ -213,7 +215,7 @@ else:
             st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
 
 # ---------------------------
-# Main Inputs (center) — resume first, then JD per cycle
+# Main Inputs (center) — resume first, then JD
 # ---------------------------
 resume_container = st.container()
 with resume_container:
@@ -262,7 +264,7 @@ with jd_container:
             jd_paste_click = st.button("Use This JD")
 
         def process_with_current_resume_and_jd(jd_meta: Optional[Dict[str, Any]] = None, jd_text: str = ""):
-            # Deterministic kickoff: Pre-Score + Packs (~<=500 words)
+            # Kickoff: Pre-Score + up to 4 Packs (≤ ~500 words)
             command = (
                 "Run QuickScore on the provided RESUME and JD, then continue as follows:\n"
                 "1) Output PRE-SCORE with subscores (skills_fit, experience_fit, education_fit, ats_keywords_coverage) in a clear block.\n"
@@ -316,7 +318,7 @@ with jd_container:
         # JD pasted
         if jd_paste_click and st.session_state["jd_text_temp"].strip():
             st.session_state["last_jd_meta"] = None  # this run uses pasted text
-            process_with_current_resume_and_jd(jd_meta=None, jd_text=st.session_state["jd_text_temp"])
+            process_with_current_resume_and_jd(jd_meta=None, jd_text=st.session_state["jd_text_temp"]) 
 
 # ---------------------------
 # Render prior messages
@@ -324,7 +326,7 @@ with jd_container:
 for msg in st.session_state.chat_history:
     avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"
     with st.chat_message(msg["role"], avatar=avatar):
-        st.markdown(msg["parts"])
+        st.markdown(msg["parts"])  # plain text
 
 # ---------------------------
 # Chat input — packs → apply → next options
@@ -360,7 +362,7 @@ if user_prompt:
                 "Do NOT propose new keyword packs in this turn."
             )
             parts = [types.Part.from_text(text=apply_cmd)]
-            # Always include resume + JD context
+            # Include resume + JD context
             if st.session_state.get("resume_text"):
                 parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
             if st.session_state.get("resume_meta"):
@@ -399,11 +401,11 @@ if user_prompt:
                 if st.session_state.get("resume_text"):
                     parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
                 if st.session_state.get("resume_meta"):
-                    parts.append(st.session_state["resume_meta"]["file"])
+                    parts.append(st.session_state["resume_meta"]["file"])  # resume file
                 if st.session_state.get("jd_text_temp"):
                     parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
                 if st.session_state.get("last_jd_meta"):
-                    parts.append(st.session_state["last_jd_meta"]["file"])
+                    parts.append(st.session_state["last_jd_meta"]["file"])  # JD file
                 with st.chat_message("assistant", avatar=":material/robot_2:"):
                     with st.spinner("Preparing targeted boosters…"):
                         response = st.session_state.chat.send_message(parts)
@@ -445,11 +447,11 @@ if user_prompt:
             if st.session_state.get("resume_text"):
                 parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
             if st.session_state.get("resume_meta"):
-                parts.append(st.session_state["resume_meta"]["file"])
+                parts.append(st.session_state["resume_meta"]["file"])  # resume file
             if st.session_state.get("jd_text_temp"):
                 parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
             if st.session_state.get("last_jd_meta"):
-                parts.append(st.session_state["last_jd_meta"]["file"])
+                parts.append(st.session_state["last_jd_meta"]["file"])  # JD file
             with st.chat_message("assistant", avatar=":material/robot_2:"):
                 with st.spinner("Thinking…"):
                     response = st.session_state.chat.send_message(parts)
