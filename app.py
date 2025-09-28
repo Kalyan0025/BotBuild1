@@ -7,7 +7,7 @@ import io
 import time
 import mimetypes
 from difflib import SequenceMatcher
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import streamlit as st
 from PIL import Image
@@ -62,13 +62,12 @@ def load_default_identity() -> str:
         "- If impact numbers are missing, insert <METRIC_TBD> and ask a precise follow-up.\n"
         "- Be concise, confident, and non-repetitive.\n"
         "- If you are about to repeat the same guidance as the previous turn, instead summarize in one line and ask what to refine.\n"
+        "- Persist the user's master resume for the session; whenever a new JD is provided, immediately tailor the resume to it.\n"
     )
 
 
 def parse_xmlish_instr(txt: str) -> str:
-    """Very light parser: extracts content inside <Role>, <Goal>, <Rules>, <Knowledge>, <SpecializedActions>, <Guidelines>.
-    Concatenates into a single system instruction string. Safe even if tags are missing.
-    """
+    """Extracts <Role>, <Goal>, <Rules>, <Knowledge>, <SpecializedActions>, <Guidelines> into one system instruction string."""
     import re
     sections = ["Role", "Goal", "Rules", "Knowledge", "SpecializedActions", "Guidelines"]
     chunks = []
@@ -104,7 +103,7 @@ def too_similar(a: str, b: str, threshold: float = 0.90) -> bool:
 
 
 # ---------------------------
-# Sidebar Controls
+# Sidebar (NO uploads here)
 # ---------------------------
 with st.sidebar:
     st.title("⚙️ Controls")
@@ -153,36 +152,8 @@ with st.sidebar:
     with st.expander("Show system prompt"):
         st.code(identity_text)
 
-    st.divider()
-
-    # ---- Dedicated inputs for Resume & JD to avoid the 'ask again' loop ----
-    st.markdown("### Inputs")
-    st.session_state.setdefault("resume_file", None)
-    st.session_state.setdefault("jd_file", None)
-
-    def _upload_single(label, key_state):
-        up = st.file_uploader(label, type=["pdf", "txt", "docx"], accept_multiple_files=False, key=label)
-        if up is not None:
-            try:
-                mime = up.type or (mimetypes.guess_type(up.name)[0] or "application/octet-stream")
-                gfile = client.files.upload(file=io.BytesIO(up.getvalue()), config=types.UploadFileConfig(mime_type=mime))
-                st.session_state[key_state] = {"name": up.name, "size": up.size, "mime": mime, "file": gfile}
-                st.toast(f"Uploaded: {up.name}")
-            except Exception as e:
-                st.error(f"Upload failed for {up.name}: {e}")
-
-    _upload_single("📄 Master Resume (PDF/TXT/DOCX)", "resume_file")
-    _upload_single("📑 Job Description (JD)", "jd_file")
-
-    # Optional: paste text versions (helpful if parsing fails)
-    st.session_state.setdefault("resume_text", "")
-    st.session_state.setdefault("jd_text", "")
-    with st.expander("Or paste text instead"):
-        st.session_state.resume_text = st.text_area("Resume text (optional)", value=st.session_state.resume_text, height=140)
-        st.session_state.jd_text = st.text_area("JD text (optional)", value=st.session_state.jd_text, height=140)
-
 # ---------------------------
-# Client + Chat setup
+# Client + Session setup
 # ---------------------------
 try:
     client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
@@ -190,23 +161,15 @@ except Exception as e:
     st.error("Failed to init Gemini client. Set GEMINI_API_KEY in Streamlit secrets.\n" + str(e))
     st.stop()
 
-# Session State
 st.session_state.setdefault("chat_history", [])  # our UI echo of messages
 st.session_state.setdefault("last_assistant_text", "")
 
-# Consolidate files list for sending with messages (if provided)
-consolidated_files = []
-for key in ("resume_file", "jd_file"):
-    meta = st.session_state.get(key)
-    if meta and isinstance(meta, dict) and meta.get("file"):
-        consolidated_files.append(meta)
+# Persisted resume for the session
+st.session_state.setdefault("resume_meta", None)    # {name,size,mime,file}
+st.session_state.setdefault("resume_text", "")      # optional pasted text
 
-# Also include any legacy uploaded_files list (back-compat)
-for meta in st.session_state.get("uploaded_files", []):
-    if meta and meta.get("file"):
-        consolidated_files.append(meta)
-
-# Upload/track files (legacy path removed — handled by dedicated inputs)
+# JD text cache (not persisted as file; uploaded JD triggers tailoring immediately)
+st.session_state.setdefault("jd_text_temp", "")
 
 # Create/refresh chat with current config
 search_tool = types.Tool(google_search=types.GoogleSearch())
@@ -224,86 +187,164 @@ generation_cfg = types.GenerateContentConfig(
 if "chat" not in st.session_state:
     st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
 else:
-    # If model changes, create a fresh chat; otherwise update config in-place
     if getattr(st.session_state.chat, "model", None) != model_name:
         st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
     else:
         try:
             st.session_state.chat.update(config=generation_cfg)
         except Exception:
-            # some SDK versions may not support update; recreate chat
             st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
 
-# Clear chat button
-with st.sidebar:
-    if st.button("🧹 Clear chat", use_container_width=True):
-        st.session_state.chat_history.clear()
-        st.session_state.last_assistant_text = ""
-        st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
-        st.toast("Chat cleared")
-        st.rerun()
+# ---------------------------
+# Main Inputs (CENTER) — Resume first, then JD each time
+# ---------------------------
+resume_container = st.container()
+with resume_container:
+    if not (st.session_state["resume_meta"] or st.session_state["resume_text"].strip()):
+        st.info("**Step 1 — Upload your Master Resume** (stored for this session only)")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            up = st.file_uploader("Upload Resume (PDF/TXT/DOCX)", type=["pdf", "txt", "docx"], accept_multiple_files=False, key="resume_uploader_center")
+            if up is not None:
+                try:
+                    mime = up.type or (mimetypes.guess_type(up.name)[0] or "application/octet-stream")
+                    gfile = client.files.upload(file=io.BytesIO(up.getvalue()), config=types.UploadFileConfig(mime_type=mime))
+                    st.session_state["resume_meta"] = {"name": up.name, "size": up.size, "mime": mime, "file": gfile}
+                    st.toast(f"Resume on file: {up.name}")
+                except Exception as e:
+                    st.error(f"Upload failed for {up.name}: {e}")
+        with col_b:
+            st.session_state["resume_text"] = st.text_area("Or paste Resume text", value=st.session_state["resume_text"], height=140)
+            if st.button("Use Pasted Resume", type="primary"):
+                if st.session_state["resume_text"].strip():
+                    st.toast("Resume text stored for session")
+                else:
+                    st.warning("Paste some resume text first.")
+    else:
+        # Show resume on file + option to replace
+        meta = st.session_state.get("resume_meta")
+        msg = "**Resume on file:** "
+        if meta:
+            msg += f"{meta['name']} ({human_size(meta['size'])})"
+        else:
+            msg += "(pasted text)"
+        st.success(msg)
+        if st.button("Replace Resume"):
+            st.session_state["resume_meta"] = None
+            st.session_state["resume_text"] = ""
+            st.rerun()
 
-# Status chips
-st.write(":white_check_mark: **Resume loaded**" if st.session_state.get("resume_file") or st.session_state.get("resume_text") else ":x: **Resume missing**")
-st.write(":white_check_mark: **JD loaded**" if st.session_state.get("jd_file") or st.session_state.get("jd_text") else ":x: **JD missing**")
+# JD input appears only after resume is present
+jd_container = st.container()
+with jd_container:
+    if st.session_state["resume_meta"] or st.session_state["resume_text"].strip():
+        st.info("**Step 2 — Provide a Job Description (JD)**. Each time you add a JD, I will tailor your resume.")
+        col1, col2 = st.columns(2)
+        with col1:
+            jd_up = st.file_uploader("Upload JD (PDF/TXT/DOCX)", type=["pdf", "txt", "docx"], accept_multiple_files=False, key="jd_uploader_center")
+        with col2:
+            st.session_state["jd_text_temp"] = st.text_area("Or paste JD text", value=st.session_state["jd_text_temp"], height=140)
+            jd_paste_click = st.button("Use This JD")
 
+        # Auto-run when JD file is uploaded, or when paste button clicked
+        def process_with_current_resume_and_jd(jd_meta: Optional[Dict[str,Any]] = None, jd_text: str = ""):
+            # Build parts: user command + resume + JD
+            command = "Tailor my resume to this job description."
+            parts = [types.Part.from_text(text=command)]
+
+            # Include resume text if present
+            if st.session_state.get("resume_text"):
+                parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+            # Include resume file if present
+            if st.session_state.get("resume_meta"):
+                parts.append(st.session_state["resume_meta"]["file"])  # Gemini file part
+
+            # Include JD text/file
+            if jd_text.strip():
+                parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+            if jd_meta and jd_meta.get("file"):
+                parts.append(jd_meta["file"])  # Gemini file part
+
+            with st.chat_message("user", avatar="👤"):
+                st.markdown("JD provided — tailor the resume.")
+            st.session_state.chat_history.append({"role": "user", "parts": "JD provided — tailor the resume."})
+
+            try:
+                with st.chat_message("assistant", avatar=":material/robot_2:"):
+                    with st.spinner("Tailoring your resume…"):
+                        response = st.session_state.chat.send_message(parts)
+                    full_response = response.text if hasattr(response, "text") else str(response)
+
+                    # repetition guard
+                    if too_similar(st.session_state.last_assistant_text, full_response):
+                        full_response = (
+                            "I've already covered most of that. Want me to (1) propose keyword Packs, (2) regenerate with different focus, or (3) draft a concise cover letter?)"
+                        )
+                    st.markdown(full_response)
+                st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+                st.session_state.last_assistant_text = full_response
+            except Exception as e:
+                st.error(f"❌ Gemini error: {e}")
+
+        # Handle JD file upload
+        if jd_up is not None:
+            try:
+                mime = jd_up.type or (mimetypes.guess_type(jd_up.name)[0] or "application/octet-stream")
+                jd_gfile = client.files.upload(file=io.BytesIO(jd_up.getvalue()), config=types.UploadFileConfig(mime_type=mime))
+                jd_meta = {"name": jd_up.name, "size": jd_up.size, "mime": mime, "file": jd_gfile}
+                ensure_active_files(client, [jd_meta])
+                st.toast(f"JD received: {jd_up.name}")
+                process_with_current_resume_and_jd(jd_meta=jd_meta, jd_text="")
+            except Exception as e:
+                st.error(f"Upload failed for {jd_up.name}: {e}")
+
+        # Handle pasted JD
+        if jd_paste_click and st.session_state["jd_text_temp"].strip():
+            process_with_current_resume_and_jd(jd_meta=None, jd_text=st.session_state["jd_text_temp"]) 
+
+# ---------------------------
 # Render prior messages
+# ---------------------------
 for msg in st.session_state.chat_history:
     avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"
     with st.chat_message(msg["role"], avatar=avatar):
-        st.markdown(msg["parts"])  # already plain text
+        st.markdown(msg["parts"])  # plain text
 
 # ---------------------------
-# Chat input
+# Open chat input for follow-ups
 # ---------------------------
-user_prompt = st.chat_input("Type a question or say 'Tailor my resume' once both files are loaded…")
-
-# Helper to build the payload parts (text + files + pasted text)
-def _build_payload(prompt: str):
-    parts = [types.Part.from_text(text=prompt)]
-    # Include pasted texts as inline parts if present
-    if st.session_state.get("resume_text"):
-        parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-    if st.session_state.get("jd_text"):
-        parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text"]))
-    # Include uploaded file handles (resume, JD)
-    for meta in consolidated_files:
-        parts.append(meta["file"])  # SDK accepts file parts directly
-    return parts
-
+user_prompt = st.chat_input("Ask follow‑ups (e.g., 'show keyword packs', 'generate cover letter')…")
 if user_prompt:
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
     with st.chat_message("user", avatar="👤"):
         st.markdown(user_prompt)
 
-    with st.chat_message("assistant", avatar=":material/robot_2:"):
-        try:
-            # Gate: if either resume or JD missing, don't call the model — give a clear, single reminder.
-            need_resume = not (st.session_state.get("resume_file") or st.session_state.get("resume_text"))
-            need_jd = not (st.session_state.get("jd_file") or st.session_state.get("jd_text"))
-            if need_resume or need_jd:
-                msg = []
-                if need_resume: msg.append("**Upload your master resume** (PDF/TXT/DOCX) or paste it in the sidebar.")
-                if need_jd: msg.append("**Upload the Job Description (JD)** or paste it in the sidebar.")
-                st.markdown("\n".join(msg))
-                st.session_state.chat_history.append({"role": "assistant", "parts": "\n".join(msg)})
-            else:
-                # All inputs present — proceed to model call
-                parts = _build_payload(user_prompt)
-                with st.spinner("Thinking…"):
-                    response = st.session_state.chat.send_message(parts)
-                full_response = response.text if hasattr(response, "text") else str(response)
+    # If user asks to tailor but resume missing, nudge
+    need_resume = not (st.session_state.get("resume_meta") or st.session_state.get("resume_text"))
+    if need_resume:
+        with st.chat_message("assistant", avatar=":material/robot_2:"):
+            st.markdown("Please upload your **Master Resume** first above. Once it's stored, add a JD and I'll tailor it immediately.")
+        st.stop()
 
-                # Repetition guard
-                if too_similar(st.session_state.last_assistant_text, full_response):
-                    full_response = (
-                        "I've already covered most of that. Would you like me to (1) propose keyword Packs, "
-                        "(2) tailor your resume now, or (3) generate a concise cover letter?"
-                    )
-
-                st.markdown(full_response)
-                st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-                st.session_state.last_assistant_text = full_response
-
-        except Exception as e:
-            st.error(f"❌ Gemini error: {e}")
+    # Otherwise, send to model with whatever context exists
+    try:
+        parts = [types.Part.from_text(text=user_prompt)]
+        if st.session_state.get("resume_text"):
+            parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+        if st.session_state.get("resume_meta"):
+            parts.append(st.session_state["resume_meta"]["file"])  # resume file
+        if st.session_state.get("jd_text_temp"):
+            parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
+        with st.chat_message("assistant", avatar=":material/robot_2:"):
+            with st.spinner("Thinking…"):
+                response = st.session_state.chat.send_message(parts)
+            full_response = response.text if hasattr(response, "text") else str(response)
+            if too_similar(st.session_state.last_assistant_text, full_response):
+                full_response = (
+                    "I've already covered most of that. Want me to (1) propose keyword Packs, (2) regenerate with different focus, or (3) draft a concise cover letter?)"
+                )
+            st.markdown(full_response)
+        st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+        st.session_state.last_assistant_text = full_response
+    except Exception as e:
+        st.error(f"❌ Gemini error: {e}")
