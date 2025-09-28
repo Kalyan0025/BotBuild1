@@ -1,69 +1,47 @@
-# CUSTOM BOT TEMPLATE
-# Copyright (c) 2025 Ronald A. Beghetto
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this code and associated files, to use, copy, modify, merge, publish,
-# distribute, sublicense, and/or sell copies of the code, and to permit
-# persons to whom the code is furnished to do so, subject to the
-# following conditions:
-#
-# An acknowledgement of the original template author must be made in any use,
-# in whole or part, of this code. The following notice shall be included:
-# "This code uses portions of code developed by Ronald A. Beghetto for a
-# course taught at Arizona State University."
-#
-# THE CODE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+# ReadySetRole — Simple Gemini Chatbot (Streamlit)
+# Fixes: repetition, hallucination guard, instruction upload, small+clean UI
+# Author credit retained per original template license.
+# "This code uses portions of code developed by Ronald A. Beghetto for a course taught at Arizona State University."
 
-import streamlit as st
-from PIL import Image
 import io
 import time
 import mimetypes
+from difflib import SequenceMatcher
+from typing import List, Dict, Any
+
+import streamlit as st
+from PIL import Image
 
 from google import genai
 from google.genai import types
 
+# ---------------------------
+# Page + Header
+# ---------------------------
 st.set_page_config(
-    page_title="My Bot",
+    page_title="ReadySetRole Bot",
     layout="centered",
     initial_sidebar_state="expanded"
 )
 
-# --- Centering the Image and its Caption ---
+# Centered header image (optional)
 try:
-    # Use columns to center the image
     col1, col2, col3 = st.columns([1, 6, 1])
     with col2:
-        st.image(
-            Image.open("Bot1.png"),
-            caption="Bot Created by GommaBelt (2025)",
-            width=340
-        )
-except Exception as e:
-    st.error(f"Error loading image: {e}")
+        st.image(Image.open("Bot1.png"), caption="ReadySetRole (2025)", width=340)
+except Exception:
+    pass
 
-# --- Centering the Title and its sub-text ---
-st.markdown("<h1 style='text-align: center;'>Ready Set Role</h1>", unsafe_allow_html=True)
-st.markdown(
-    "<div style='text-align:center;color:gray;font-size:12px;'>"
-    "I can make mistakes—please verify important information."
-    "</div>",
-    unsafe_allow_html=True,
+st.markdown("<h1 style='text-align:center'>ReadySetRole</h1>", unsafe_allow_html=True)
+sub = (
+    "I can make mistakes — please verify important information. "
+    "No fabrication: I use only your resume, the job description, and what you explicitly approve."
 )
+st.markdown(f"<div style='text-align:center;color:gray;font-size:12px'>{sub}</div>", unsafe_allow_html=True)
 
-def load_developer_prompt() -> str:
-    try:
-        with open("identity.txt") as f:
-            return f.read()
-    except FileNotFoundError:
-        st.warning("⚠️ 'identity.txt' not found. Using default prompt.")
-        return ("You are a helpful assistant. "
-                "Be friendly, engaging, and provide clear, concise responses.")
+# ---------------------------
+# Helpers
+# ---------------------------
 
 def human_size(n: int) -> str:
     for unit in ["B", "KB", "MB", "GB"]:
@@ -72,173 +50,198 @@ def human_size(n: int) -> str:
         n /= 1024.0
     return f"{n:.1f} TB"
 
-try:
-    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-    system_instructions = load_developer_prompt()
-    search_tool = types.Tool(google_search=types.GoogleSearch())
 
-    # Removed thinking_config to avoid validation error
-    generation_cfg = types.GenerateContentConfig(
-        system_instruction=system_instructions,
-        tools=[search_tool],
-        temperature=1.0,
-        max_output_tokens=2048,
+def load_default_identity() -> str:
+    return (
+        "You are ReadysetRole — a resume optimization assistant that turns a user's master resume "
+        "and a job description (JD) into an ATS-safe tailored resume and a concise, evidence-based cover letter.\n\n"
+        "Rules:\n"
+        "- Never fabricate titles, employers, tools, certs, or metrics.\n"
+        "- Use only what the user provides or has explicitly verified.\n"
+        "- Keep outputs plain-text, single column, ATS-safe.\n"
+        "- If impact numbers are missing, insert <METRIC_TBD> and ask a precise follow-up.\n"
+        "- Be concise, confident, and non-repetitive.\n"
+        "- If you are about to repeat the same guidance as the previous turn, instead summarize in one line and ask what to refine.\n"
     )
 
-except Exception as e:
-    st.error(
-        "Error initializing the Gemini client. "
-        "Check your `GEMINI_API_KEY` in Streamlit → Settings → Secrets. "
-        f"Details: {e}"
-    )
-    st.stop()
 
-st.session_state.setdefault("chat_history", [])
-st.session_state.setdefault("uploaded_files", [])
+def parse_xmlish_instr(txt: str) -> str:
+    """Very light parser: extracts content inside <Role>, <Goal>, <Rules>, <Knowledge>, <SpecializedActions>, <Guidelines>.
+    Concatenates into a single system instruction string. Safe even if tags are missing.
+    """
+    import re
+    sections = ["Role", "Goal", "Rules", "Knowledge", "SpecializedActions", "Guidelines"]
+    chunks = []
+    for tag in sections:
+        m = re.search(fr"<{tag}>(.*?)</{tag}>", txt, flags=re.DOTALL | re.IGNORECASE)
+        if m:
+            chunks.append(f"{tag}:\n{m.group(1).strip()}\n\n")
+    return "".join(chunks).strip() or load_default_identity()
 
-with st.sidebar:
-    st.title("⚙️ Controls")
-    st.markdown("### About: Briefly describe your bot here for users.")
 
-    with st.expander(":material/text_fields_alt: Model Selection", expanded=True):
-        selected_model = st.selectbox(
-            "Choose a model:",
-            options=[
-                "gemini-2.5-pro",
-                "gemini-2.5-flash",
-                "gemini-2.5-flash-lite"
-            ],
-            index=2,
-            label_visibility="visible",
-            help="Response Per Day Limits: Pro = 100, Flash = 250, Flash-lite = 1000"
-        )
-        st.caption(f"Selected: **{selected_model}**")
-
-        if "chat" not in st.session_state:
-            st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
-        elif getattr(st.session_state.chat, "model", None) != selected_model:
-            st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
-
-    if st.button("🧹 Clear chat", use_container_width=True):
-        st.session_state.chat_history.clear()
-        st.session_state.chat = client.chats.create(model=selected_model, config=generation_cfg)
-        st.toast("Chat cleared.")
-        st.rerun()
-
-    with st.expander(":material/attach_file: Files (PDF/TXT/DOCX)", expanded=True):
-        st.caption(
-            "Attach up to **5** files. They’ll be uploaded once and reused across turns. "
-            "Files are stored temporarily (~48 hrs) and count toward your 20GB cap."
-        )
-        uploads = st.file_uploader(
-            "Upload files",
-            type=["pdf", "txt", "docx"],
-            accept_multiple_files=True,
-            label_visibility="collapsed"
-        )
-
-        def _upload_to_gemini(u):
-            mime = u.type or (mimetypes.guess_type(u.name)[0] or "application/octet-stream")
-            data = u.getvalue()
-            gfile = client.files.upload(
-                file=io.BytesIO(data),
-                config=types.UploadFileConfig(mime_type=mime)
-            )
-            return {
-                "name": u.name,
-                "size": len(data),
-                "mime": mime,
-                "file": gfile,
-            }
-
-        if uploads:
-            slots_left = max(0, 5 - len(st.session_state.uploaded_files))
-            newly_added = []
-            for u in uploads[:slots_left]:
-                already = any((u.name == f["name"] and u.size == f["size"]) for f in st.session_state.uploaded_files)
-                if already:
-                    continue
-                try:
-                    meta = _upload_to_gemini(u)
-                    st.session_state.uploaded_files.append(meta)
-                    newly_added.append(meta["name"])
-                except Exception as e:
-                    st.error(f"File upload failed for **{u.name}**: {e}")
-            if newly_added:
-                st.toast(f"Uploaded: {', '.join(newly_added)}")
-
-        st.markdown("**Attached files**")
-        if st.session_state.uploaded_files:
-            for idx, meta in enumerate(st.session_state.uploaded_files):
-                left, right = st.columns([0.88, 0.12])
-                with left:
-                    st.write(
-                        f"• {meta['name']} <small>{human_size(meta['size'])} · {meta['mime']}</small>",
-                        unsafe_allow_html=True
-                    )
-                with right:
-                    if st.button("✖", key=f"remove_{idx}"):
-                        try:
-                            client.files.delete(name=meta['file'].name)
-                        except Exception:
-                            pass
-                        st.session_state.uploaded_files.pop(idx)
-                        st.rerun()
-            st.caption(f"{5 - len(st.session_state.uploaded_files)} slots remaining.")
-        else:
-            st.caption("No files attached.")
-
-    with st.expander("🛠️ Developer: See and Delete all files on Google", expanded=False):
-        try:
-            files_list = client.files.list()
-            if not files_list:
-                st.caption("No active files on server.")
-            else:
-                for f in files_list:
-                    exp = getattr(f, "expiration_time", None)
-                    exp_str = exp if exp else "?"
-                    size = getattr(f, "size_bytes", None)
-                    size_str = f"{size/1024:.1f} KB" if size else "?"
-                    st.write(f"• **{f.name}** ({f.mime_type}, {size_str}) Expires: {exp_str}")
-                if st.button("🗑️ Delete all files", use_container_width=True):
-                    failed = []
-                    for f in files_list:
-                        try:
-                            client.files.delete(name=f.name)
-                        except Exception as e:
-                            failed.append(f.name)
-                    if failed:
-                        st.error(f"Failed to delete: {', '.join(failed)}")
-                    else:
-                        st.success("All files deleted.")
-                        st.rerun()
-        except Exception as e:
-            st.error(f"Could not fetch files list: {e}")
-
-with st.container():
-    for msg in st.session_state.chat_history:
-        avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"
-        with st.chat_message(msg["role"], avatar=avatar):
-            st.markdown(msg["parts"])
-
-def _ensure_files_active(files, max_wait_s: float = 12.0):
+def ensure_active_files(client: genai.Client, files_meta: List[Dict[str, Any]], max_wait_s: float = 12.0):
     deadline = time.time() + max_wait_s
     any_processing = True
     while any_processing and time.time() < deadline:
         any_processing = False
-        for i, meta in enumerate(files):
+        for i, meta in enumerate(files_meta):
             fobj = meta["file"]
-            if getattr(fobj, "state", "") not in ("ACTIVE",):
+            if getattr(fobj, "state", "") != "ACTIVE":
                 any_processing = True
                 try:
-                    updated = client.files.get(name=fobj.name)
-                    files[i]["file"] = updated
+                    files_meta[i]["file"] = client.files.get(name=fobj.name)
                 except Exception:
                     pass
         if any_processing:
-            time.sleep(0.6)
+            time.sleep(0.5)
 
-if user_prompt := st.chat_input("Message 'your bot name'…"):
+
+def too_similar(a: str, b: str, threshold: float = 0.90) -> bool:
+    if not a or not b:
+        return False
+    ratio = SequenceMatcher(None, a.strip(), b.strip()).ratio()
+    return ratio >= threshold
+
+
+# ---------------------------
+# Sidebar Controls
+# ---------------------------
+with st.sidebar:
+    st.title("⚙️ Controls")
+    st.caption("Simple, non-repeating Gemini bot for resume tailoring.")
+
+    st.markdown("### Model")
+    model_name = st.selectbox(
+        "Choose a model",
+        ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
+        index=0,
+    )
+
+    st.markdown("### Generation Settings")
+    temperature = st.slider("temperature", 0.0, 1.0, 0.2, 0.05)
+    top_p = st.slider("top_p", 0.0, 1.0, 0.9, 0.05)
+    top_k = st.slider("top_k", 1, 100, 40, 1)
+    max_tokens = st.number_input("max_output_tokens", min_value=256, max_value=4096, value=1536, step=64)
+    concise_mode = st.toggle("Concise mode (short answers)", value=True, help="Adds extra brevity hints to the system instruction")
+
+    st.divider()
+
+    st.markdown("### System Instructions")
+    instr_src = st.radio("Load instructions from:", ["identity.txt", "Paste inline"], index=1, horizontal=True)
+    pasted = ""
+    identity_text = load_default_identity()
+    if instr_src == "identity.txt":
+        try:
+            with open("identity.txt", "r") as f:
+                raw = f.read()
+            identity_text = parse_xmlish_instr(raw) if "<Role>" in raw else raw
+        except FileNotFoundError:
+            st.warning("identity.txt not found — using default identity.")
+    else:
+        pasted = st.text_area(
+            "Paste your <Role>…<Guidelines> block (optional)",
+            height=220,
+            placeholder="<Role>…</Role>\n<Goal>…</Goal>\n<Rules>…</Rules>\n…",
+        )
+        if pasted.strip():
+            identity_text = parse_xmlish_instr(pasted)
+
+    if concise_mode:
+        identity_text += "\n\nStyle: Prefer concise bullets and avoid repetition across turns."
+
+    st.caption("Effective system prompt in use:")
+    with st.expander("Show system prompt"):
+        st.code(identity_text)
+
+    st.divider()
+
+    # File uploads reused across turns
+    st.markdown("### Files (PDF/TXT/DOCX)")
+    st.caption("Attach up to 5 files. Uploaded once, reused across turns. Stored temporarily (~48h).")
+    uploads = st.file_uploader(
+        "Upload files",
+        type=["pdf", "txt", "docx"],
+        accept_multiple_files=True,
+        label_visibility="collapsed"
+    )
+
+# ---------------------------
+# Client + Chat setup
+# ---------------------------
+try:
+    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+except Exception as e:
+    st.error("Failed to init Gemini client. Set GEMINI_API_KEY in Streamlit secrets.\n" + str(e))
+    st.stop()
+
+# Session State
+st.session_state.setdefault("chat_history", [])  # our UI echo of messages
+st.session_state.setdefault("uploaded_files", [])
+st.session_state.setdefault("last_assistant_text", "")
+
+# Upload/track files
+if uploads:
+    # Limit to 5 unique files by name+size
+    slots_left = max(0, 5 - len(st.session_state.uploaded_files))
+    for u in uploads[:slots_left]:
+        already = any((u.name == f["name"] and u.size == f["size"]) for f in st.session_state.uploaded_files)
+        if already:
+            continue
+        try:
+            mime = u.type or (mimetypes.guess_type(u.name)[0] or "application/octet-stream")
+            gfile = client.files.upload(file=io.BytesIO(u.getvalue()), config=types.UploadFileConfig(mime_type=mime))
+            st.session_state.uploaded_files.append({"name": u.name, "size": u.size, "mime": mime, "file": gfile})
+            st.toast(f"Uploaded: {u.name}")
+        except Exception as e:
+            st.error(f"Upload failed for {u.name}: {e}")
+
+# Create/refresh chat with current config
+search_tool = types.Tool(google_search=types.GoogleSearch())
+
+generation_cfg = types.GenerateContentConfig(
+    system_instruction=identity_text,
+    tools=[search_tool],
+    temperature=float(temperature),
+    top_p=float(top_p),
+    top_k=int(top_k),
+    max_output_tokens=int(max_tokens),
+    response_mime_type="text/plain",
+)
+
+if "chat" not in st.session_state:
+    st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
+else:
+    # If model changes, create a fresh chat; otherwise update config in-place
+    if getattr(st.session_state.chat, "model", None) != model_name:
+        st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
+    else:
+        try:
+            st.session_state.chat.update(config=generation_cfg)
+        except Exception:
+            # some SDK versions may not support update; recreate chat
+            st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
+
+# Clear chat button
+with st.sidebar:
+    if st.button("🧹 Clear chat", use_container_width=True):
+        st.session_state.chat_history.clear()
+        st.session_state.last_assistant_text = ""
+        st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
+        st.toast("Chat cleared")
+        st.rerun()
+
+# Render prior messages
+for msg in st.session_state.chat_history:
+    avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"
+    with st.chat_message(msg["role"], avatar=avatar):
+        st.markdown(msg["parts"])  # already plain text
+
+# ---------------------------
+# Chat input
+# ---------------------------
+user_prompt = st.chat_input("Upload your master resume + JD, then ask anything…")
+
+if user_prompt:
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
     with st.chat_message("user", avatar="👤"):
         st.markdown(user_prompt)
@@ -247,20 +250,27 @@ if user_prompt := st.chat_input("Message 'your bot name'…"):
         try:
             contents_to_send = None
             if st.session_state.uploaded_files:
-                _ensure_files_active(st.session_state.uploaded_files)
-                contents_to_send = [
-                    types.Part.from_text(text=user_prompt)
-                ] + [meta["file"] for meta in st.session_state.uploaded_files]
+                ensure_active_files(client, st.session_state.uploaded_files)
+                contents_to_send = [types.Part.from_text(text=user_prompt)] + [m["file"] for m in st.session_state.uploaded_files]
 
-            with st.spinner("🔍 Thinking about what I know about this ..."):
+            with st.spinner("Thinking…"):
                 if contents_to_send is None:
                     response = st.session_state.chat.send_message(user_prompt)
                 else:
                     response = st.session_state.chat.send_message(contents_to_send)
 
             full_response = response.text if hasattr(response, "text") else str(response)
-            st.markdown(full_response)
-        except Exception as e:
-            st.error(f"❌ Error from Gemini: {e}")
 
-        st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+            # Repetition guard — if too similar to last assistant text, summarize+ask next step
+            if too_similar(st.session_state.last_assistant_text, full_response):
+                full_response = (
+                    "I've already covered most of that. Would you like me to (1) propose keyword Packs, "
+                    "(2) tailor your resume now, or (3) generate a concise cover letter?"
+                )
+
+            st.markdown(full_response)
+            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+            st.session_state.last_assistant_text = full_response
+
+        except Exception as e:
+            st.error(f"❌ Gemini error: {e}")
