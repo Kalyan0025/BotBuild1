@@ -1,5 +1,6 @@
 # ReadySetRole — Simple Gemini Chatbot (Streamlit)
 # Deterministic flow with stage tracking; robust response parsing; resume persisted for session
+# Two-step "Apply" to avoid truncation: (A) Resume only → (B) Post-Score + Letter + Change Log + Options
 # License note per template:
 # "This code uses portions of code developed by Ronald A. Beghetto for a course taught at Arizona State University."
 
@@ -129,15 +130,15 @@ with st.sidebar:
     st.markdown("### Model")
     model_name = st.selectbox(
         "Choose a model",
-        ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
-        index=1,
+        ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
+        index=0,
     )
 
     st.markdown("### Generation Settings")
     temperature = st.slider("temperature", 0.0, 1.0, 0.2, 0.05)
     top_p = st.slider("top_p", 0.0, 1.0, 0.9, 0.05)
     top_k = st.slider("top_k", 1, 100, 40, 1)
-    max_tokens = st.number_input("max_output_tokens", min_value=256, max_value=4096, value=3072, step=64)
+    max_tokens = st.number_input("max_output_tokens", min_value=512, max_value=4096, value=3584, step=64)
     concise_mode = st.toggle("Concise mode (short answers)", value=True, help="Adds extra brevity hints to the system instruction")
 
     st.divider()
@@ -347,45 +348,67 @@ if user_prompt:
     option_match = re.fullmatch(r"\s*[123]\s*", user_prompt)
 
     try:
-        # A) APPLY PACKS (only if we are expecting them)
+        # A) APPLY PACKS (only if we are expecting them) — TWO-STEP TO AVOID TRUNCATION
         if st.session_state.get("awaiting_pack_selection") and pack_match:
             selection = user_prompt.strip()
-            apply_cmd = (
+
+            # --- STEP A: Apply + Tailored Resume ONLY ---
+            apply_cmd_a = (
                 "ApplySuggestions with the selected packs: '" + selection + "'. "
-                "Then generate, in this order: "
-                "1) Tailored ATS-safe resume. "
+                "Output ONLY the Tailored ATS-safe resume (plain text). "
+                "Do NOT include Post-Score, percentages, cover letter, change log, or extra commentary. "
+                "End with a line exactly: [END_RESUME]"
+            )
+            parts_a = [types.Part.from_text(text=apply_cmd_a)]
+            if st.session_state.get("resume_text"):
+                parts_a.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+            if st.session_state.get("resume_meta"):
+                parts_a.append(st.session_state["resume_meta"]["file"])
+            if st.session_state.get("jd_text_temp"):
+                parts_a.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
+            if st.session_state.get("last_jd_meta"):
+                parts_a.append(st.session_state["last_jd_meta"]["file"])
+
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                with st.spinner("Applying packs — generating tailored resume…"):
+                    resp_a = st.session_state.chat.send_message(parts_a)
+                resume_only = extract_text_from_response(resp_a) or "[Resume content missing]"
+                st.markdown(resume_only)
+
+            # --- STEP B: Post-Score + Cover Letter + Change Log + Options ---
+            apply_cmd_b = (
+                "Now output the remaining items for the same tailoring you just performed: "
                 "2) POST-SCORE (overall 0–100) and Δ vs PRE-SCORE. "
                 "3) Concise evidence-based cover letter (180–250 words). "
                 "4) Short Change Log (before→after bullets). "
                 "At the very end, print on separate lines: NEW MATCH %: <overall>\n"
                 "NEXT OPTIONS: [1] Suggest minor boosters (no new packs), [2] Accept & move to next JD, [3] Export .txt. "
-                "Do NOT propose new keyword packs in this turn."
+                "Do NOT repeat the resume and do NOT propose new keyword packs."
             )
-            parts = [types.Part.from_text(text=apply_cmd)]
-            # Include resume + JD context
+            parts_b = [types.Part.from_text(text=apply_cmd_b)]
             if st.session_state.get("resume_text"):
-                parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+                parts_b.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
             if st.session_state.get("resume_meta"):
-                parts.append(st.session_state["resume_meta"]["file"])
+                parts_b.append(st.session_state["resume_meta"]["file"])
             if st.session_state.get("jd_text_temp"):
-                parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
+                parts_b.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
             if st.session_state.get("last_jd_meta"):
-                parts.append(st.session_state["last_jd_meta"]["file"])
+                parts_b.append(st.session_state["last_jd_meta"]["file"])
 
             with st.chat_message("assistant", avatar=":material/robot_2:"):
-                with st.spinner("Applying your selections and generating outputs…"):
-                    response = st.session_state.chat.send_message(parts)
-                full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
-                if too_similar(st.session_state.last_assistant_text, full_response):
-                    full_response = "Outputs generated above. Want me to export a plain-text file?"
-                st.markdown(full_response)
-            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-            st.session_state.last_assistant_text = full_response
-            st.session_state["last_apply_output"] = full_response
+                with st.spinner("Finishing — Post-Score, cover letter, and change log…"):
+                    resp_b = st.session_state.chat.send_message(parts_b)
+                rest = extract_text_from_response(resp_b) or "[Details missing]"
+                st.markdown(rest)
+
+            # Save combined output for export
+            st.session_state["last_apply_output"] = (resume_only.rstrip() + "\n\n" + rest.lstrip()).strip()
 
             # Move to next-options phase
             st.session_state["awaiting_pack_selection"] = False
             st.session_state["awaiting_next_options"] = True
+            st.session_state["last_assistant_text"] = st.session_state["last_apply_output"]
+            st.session_state.chat_history.append({"role": "assistant", "parts": st.session_state["last_apply_output"]})
 
         # B) NEXT OPTIONS (after apply): 1/2/3
         elif st.session_state.get("awaiting_next_options") and option_match:
