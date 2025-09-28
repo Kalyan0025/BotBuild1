@@ -122,54 +122,56 @@ def extract_text_from_response(resp) -> str:
                 if pt:
                     out.append(pt)
         if out:
-            return "
-".join(out).strip()
+            return "\n".join(out).strip()
     except Exception:
         pass
     return ""
 
-    st.markdown("### Model")
-    model_name = st.selectbox(
-        "Choose a model",
-        ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
-        index=1,
+# ---------------------------
+# Model + Settings
+# ---------------------------
+st.markdown("### Model")
+model_name = st.selectbox(
+    "Choose a model",
+    ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
+    index=1,
+)
+
+st.markdown("### Generation Settings")
+temperature = st.slider("temperature", 0.0, 1.0, 0.2, 0.05)
+top_p = st.slider("top_p", 0.0, 1.0, 0.9, 0.05)
+top_k = st.slider("top_k", 1, 100, 40, 1)
+max_tokens = st.number_input("max_output_tokens", min_value=256, max_value=4096, value=3072, step=64)
+concise_mode = st.toggle("Concise mode (short answers)", value=True, help="Adds extra brevity hints to the system instruction")
+
+st.divider()
+
+st.markdown("### System Instructions")
+instr_src = st.radio("Load instructions from:", ["identity.txt", "Paste inline"], index=1, horizontal=True)
+pasted = ""
+identity_text = load_default_identity()
+if instr_src == "identity.txt":
+    try:
+        with open("identity.txt", "r") as f:
+            raw = f.read()
+        identity_text = parse_xmlish_instr(raw) if "<Role>" in raw else raw
+    except FileNotFoundError:
+        st.warning("identity.txt not found — using default identity.")
+else:
+    pasted = st.text_area(
+        "Paste your <Role>…<Guidelines> block (optional)",
+        height=220,
+        placeholder="<Role>…</Role>\n<Goal>…</Goal>\n<Rules>…</Rules>\n…",
     )
+    if pasted.strip():
+        identity_text = parse_xmlish_instr(pasted)
 
-    st.markdown("### Generation Settings")
-    temperature = st.slider("temperature", 0.0, 1.0, 0.2, 0.05)
-    top_p = st.slider("top_p", 0.0, 1.0, 0.9, 0.05)
-    top_k = st.slider("top_k", 1, 100, 40, 1)
-    max_tokens = st.number_input("max_output_tokens", min_value=256, max_value=4096, value=3072, step=64)
-    concise_mode = st.toggle("Concise mode (short answers)", value=True, help="Adds extra brevity hints to the system instruction")
+if concise_mode:
+    identity_text += "\n\nStyle: Prefer concise bullets and avoid repetition across turns."
 
-    st.divider()
-
-    st.markdown("### System Instructions")
-    instr_src = st.radio("Load instructions from:", ["identity.txt", "Paste inline"], index=1, horizontal=True)
-    pasted = ""
-    identity_text = load_default_identity()
-    if instr_src == "identity.txt":
-        try:
-            with open("identity.txt", "r") as f:
-                raw = f.read()
-            identity_text = parse_xmlish_instr(raw) if "<Role>" in raw else raw
-        except FileNotFoundError:
-            st.warning("identity.txt not found — using default identity.")
-    else:
-        pasted = st.text_area(
-            "Paste your <Role>…<Guidelines> block (optional)",
-            height=220,
-            placeholder="<Role>…</Role>\n<Goal>…</Goal>\n<Rules>…</Rules>\n…",
-        )
-        if pasted.strip():
-            identity_text = parse_xmlish_instr(pasted)
-
-    if concise_mode:
-        identity_text += "\n\nStyle: Prefer concise bullets and avoid repetition across turns."
-
-    st.caption("Effective system prompt in use:")
-    with st.expander("Show system prompt"):
-        st.code(identity_text)
+st.caption("Effective system prompt in use:")
+with st.expander("Show system prompt"):
+    st.code(identity_text)
 
 # ---------------------------
 # Client + Session setup
@@ -269,13 +271,11 @@ with jd_container:
         def process_with_current_resume_and_jd(jd_meta: Optional[Dict[str,Any]] = None, jd_text: str = ""):
             # Compose an explicit, deterministic instruction to kick off the pipeline
             command = (
-                """
-Run QuickScore on the provided RESUME and JD, then continue as follows:
-1) Output PRE-SCORE with subscores (skills_fit, experience_fit, education_fit, ats_keywords_coverage) in a clear block.
-2) List up to 4 KEYWORD PACKS (numbered 1..N) with short labels and predicted score lift.
-3) End with: 'Reply with 1,2,3 or 0 for all to apply.'
-Constraints: Keep total output under 500 words. No fabrication; use only resume + JD evidence. ATS-safe formatting.
-                """
+                "Run QuickScore on the provided RESUME and JD, then continue as follows:\n"
+                "1) Output PRE-SCORE with subscores (skills_fit, experience_fit, education_fit, ats_keywords_coverage) in a clear block.\n"
+                "2) List up to 4 KEYWORD PACKS (numbered 1..N) with short labels and predicted score lift.\n"
+                "3) End with: 'Reply with 1,2,3 or 0 for all to apply.'\n"
+                "Constraints: Keep total output under 500 words. No fabrication; use only resume + JD evidence. ATS-safe formatting."
             )
             parts = [types.Part.from_text(text=command)]
             if st.session_state.get("resume_text"):
@@ -341,58 +341,3 @@ if user_prompt:
 
     # If no resume yet, nudge
     need_resume = not (st.session_state.get("resume_meta") or st.session_state.get("resume_text"))
-    if need_resume:
-        with st.chat_message("assistant", avatar=":material/robot_2:"):
-            st.markdown("Please upload your **Master Resume** first above. Then add a JD; I’ll score and propose packs.")
-        st.stop()
-
-    # Detect a pack selection like '0' or '1,3,4'
-    pack_match = re.fullmatch(r"\s*0\s*|\s*(\d+\s*(,\s*\d+\s*)*)\s*", user_prompt)
-
-    try:
-        if pack_match:
-            # Tell the model to apply packs and finish the flow
-            selection = user_prompt.strip()
-            apply_cmd = (
-                "ApplySuggestions with the selected packs: '" + selection + "'. "
-                "Then generate: (a) the tailored ATS-safe resume, (b) Post-Score with delta vs Pre-Score, "
-                "(c) a concise evidence-based cover letter (180–250 words), and (d) a short Change Log (before→after bullets). "
-                "If metrics are missing, insert <METRIC_TBD> and list 3 micro-questions via AskForMetrics at the end."
-            )
-            parts = [types.Part.from_text(text=apply_cmd)]
-            if st.session_state.get("resume_text"):
-                parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-            if st.session_state.get("resume_meta"):
-                parts.append(st.session_state["resume_meta"]["file"])  # resume file
-            if st.session_state.get("jd_text_temp"):
-                parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
-
-            with st.chat_message("assistant", avatar=":material/robot_2:"):
-                with st.spinner("Applying your selections and generating outputs…"):
-                    response = st.session_state.chat.send_message(parts)
-                full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
-                if too_similar(st.session_state.last_assistant_text, full_response):
-                    full_response = "Outputs generated above. Want me to export a plain-text file?"
-                st.markdown(full_response)
-            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-            st.session_state.last_assistant_text = full_response
-        else:
-            # General follow-up: include resume + current JD text context
-            parts = [types.Part.from_text(text=user_prompt)]
-            if st.session_state.get("resume_text"):
-                parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-            if st.session_state.get("resume_meta"):
-                parts.append(st.session_state["resume_meta"]["file"])  # resume file
-            if st.session_state.get("jd_text_temp"):
-                parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
-            with st.chat_message("assistant", avatar=":material/robot_2:"):
-                with st.spinner("Thinking…"):
-                    response = st.session_state.chat.send_message(parts)
-                full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
-                if too_similar(st.session_state.last_assistant_text, full_response):
-                    full_response = "I've covered that above. Want me to export, or propose boosters?"
-                st.markdown(full_response)
-            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-            st.session_state.last_assistant_text = full_response
-    except Exception as e:
-        st.error(f"❌ Gemini error: {e}")
