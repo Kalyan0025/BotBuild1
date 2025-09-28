@@ -141,18 +141,13 @@ with st.sidebar:
         pasted = st.text_area(
             "Paste your <Role>…<Guidelines> block (optional)",
             height=220,
-            placeholder="<Role>…</Role>
-<Goal>…</Goal>
-<Rules>…</Rules>
-…",
+            placeholder="<Role>…</Role>\n<Goal>…</Goal>\n<Rules>…</Rules>\n…",
         )
         if pasted.strip():
             identity_text = parse_xmlish_instr(pasted)
 
     if concise_mode:
-        identity_text += "
-
-Style: Prefer concise bullets and avoid repetition across turns."
+        identity_text += "\n\nStyle: Prefer concise bullets and avoid repetition across turns."
 
     st.caption("Effective system prompt in use:")
     with st.expander("Show system prompt"):
@@ -212,20 +207,6 @@ for meta in st.session_state.get("uploaded_files", []):
         consolidated_files.append(meta)
 
 # Upload/track files (legacy path removed — handled by dedicated inputs)
-if uploads:
-    # Limit to 5 unique files by name+size
-    slots_left = max(0, 5 - len(st.session_state.uploaded_files))
-    for u in uploads[:slots_left]:
-        already = any((u.name == f["name"] and u.size == f["size"]) for f in st.session_state.uploaded_files)
-        if already:
-            continue
-        try:
-            mime = u.type or (mimetypes.guess_type(u.name)[0] or "application/octet-stream")
-            gfile = client.files.upload(file=io.BytesIO(u.getvalue()), config=types.UploadFileConfig(mime_type=mime))
-            st.session_state.uploaded_files.append({"name": u.name, "size": u.size, "mime": mime, "file": gfile})
-            st.toast(f"Uploaded: {u.name}")
-        except Exception as e:
-            st.error(f"Upload failed for {u.name}: {e}")
 
 # Create/refresh chat with current config
 search_tool = types.Tool(google_search=types.GoogleSearch())
@@ -282,11 +263,9 @@ def _build_payload(prompt: str):
     parts = [types.Part.from_text(text=prompt)]
     # Include pasted texts as inline parts if present
     if st.session_state.get("resume_text"):
-        parts.append(types.Part.from_text(text="[RESUME TEXT]
-" + st.session_state["resume_text"]))
+        parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
     if st.session_state.get("jd_text"):
-        parts.append(types.Part.from_text(text="[JD TEXT]
-" + st.session_state["jd_text"]))
+        parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text"]))
     # Include uploaded file handles (resume, JD)
     for meta in consolidated_files:
         parts.append(meta["file"])  # SDK accepts file parts directly
@@ -306,10 +285,8 @@ if user_prompt:
                 msg = []
                 if need_resume: msg.append("**Upload your master resume** (PDF/TXT/DOCX) or paste it in the sidebar.")
                 if need_jd: msg.append("**Upload the Job Description (JD)** or paste it in the sidebar.")
-                st.markdown("
-".join(msg))
-                st.session_state.chat_history.append({"role": "assistant", "parts": "
-".join(msg)})
+                st.markdown("\n".join(msg))
+                st.session_state.chat_history.append({"role": "assistant", "parts": "\n".join(msg)})
             else:
                 # All inputs present — proceed to model call
                 parts = _build_payload(user_prompt)
