@@ -141,13 +141,18 @@ with st.sidebar:
         pasted = st.text_area(
             "Paste your <Role>…<Guidelines> block (optional)",
             height=220,
-            placeholder="<Role>…</Role>\n<Goal>…</Goal>\n<Rules>…</Rules>\n…",
+            placeholder="<Role>…</Role>
+<Goal>…</Goal>
+<Rules>…</Rules>
+…",
         )
         if pasted.strip():
             identity_text = parse_xmlish_instr(pasted)
 
     if concise_mode:
-        identity_text += "\n\nStyle: Prefer concise bullets and avoid repetition across turns."
+        identity_text += "
+
+Style: Prefer concise bullets and avoid repetition across turns."
 
     st.caption("Effective system prompt in use:")
     with st.expander("Show system prompt"):
@@ -155,15 +160,31 @@ with st.sidebar:
 
     st.divider()
 
-    # File uploads reused across turns
-    st.markdown("### Files (PDF/TXT/DOCX)")
-    st.caption("Attach up to 5 files. Uploaded once, reused across turns. Stored temporarily (~48h).")
-    uploads = st.file_uploader(
-        "Upload files",
-        type=["pdf", "txt", "docx"],
-        accept_multiple_files=True,
-        label_visibility="collapsed"
-    )
+    # ---- Dedicated inputs for Resume & JD to avoid the 'ask again' loop ----
+    st.markdown("### Inputs")
+    st.session_state.setdefault("resume_file", None)
+    st.session_state.setdefault("jd_file", None)
+
+    def _upload_single(label, key_state):
+        up = st.file_uploader(label, type=["pdf", "txt", "docx"], accept_multiple_files=False, key=label)
+        if up is not None:
+            try:
+                mime = up.type or (mimetypes.guess_type(up.name)[0] or "application/octet-stream")
+                gfile = client.files.upload(file=io.BytesIO(up.getvalue()), config=types.UploadFileConfig(mime_type=mime))
+                st.session_state[key_state] = {"name": up.name, "size": up.size, "mime": mime, "file": gfile}
+                st.toast(f"Uploaded: {up.name}")
+            except Exception as e:
+                st.error(f"Upload failed for {up.name}: {e}")
+
+    _upload_single("📄 Master Resume (PDF/TXT/DOCX)", "resume_file")
+    _upload_single("📑 Job Description (JD)", "jd_file")
+
+    # Optional: paste text versions (helpful if parsing fails)
+    st.session_state.setdefault("resume_text", "")
+    st.session_state.setdefault("jd_text", "")
+    with st.expander("Or paste text instead"):
+        st.session_state.resume_text = st.text_area("Resume text (optional)", value=st.session_state.resume_text, height=140)
+        st.session_state.jd_text = st.text_area("JD text (optional)", value=st.session_state.jd_text, height=140)
 
 # ---------------------------
 # Client + Chat setup
@@ -176,10 +197,21 @@ except Exception as e:
 
 # Session State
 st.session_state.setdefault("chat_history", [])  # our UI echo of messages
-st.session_state.setdefault("uploaded_files", [])
 st.session_state.setdefault("last_assistant_text", "")
 
-# Upload/track files
+# Consolidate files list for sending with messages (if provided)
+consolidated_files = []
+for key in ("resume_file", "jd_file"):
+    meta = st.session_state.get(key)
+    if meta and isinstance(meta, dict) and meta.get("file"):
+        consolidated_files.append(meta)
+
+# Also include any legacy uploaded_files list (back-compat)
+for meta in st.session_state.get("uploaded_files", []):
+    if meta and meta.get("file"):
+        consolidated_files.append(meta)
+
+# Upload/track files (legacy path removed — handled by dedicated inputs)
 if uploads:
     # Limit to 5 unique files by name+size
     slots_left = max(0, 5 - len(st.session_state.uploaded_files))
@@ -230,6 +262,10 @@ with st.sidebar:
         st.toast("Chat cleared")
         st.rerun()
 
+# Status chips
+st.write(":white_check_mark: **Resume loaded**" if st.session_state.get("resume_file") or st.session_state.get("resume_text") else ":x: **Resume missing**")
+st.write(":white_check_mark: **JD loaded**" if st.session_state.get("jd_file") or st.session_state.get("jd_text") else ":x: **JD missing**")
+
 # Render prior messages
 for msg in st.session_state.chat_history:
     avatar = "👤" if msg["role"] == "user" else ":material/robot_2:"
@@ -239,7 +275,22 @@ for msg in st.session_state.chat_history:
 # ---------------------------
 # Chat input
 # ---------------------------
-user_prompt = st.chat_input("Upload your master resume + JD, then ask anything…")
+user_prompt = st.chat_input("Type a question or say 'Tailor my resume' once both files are loaded…")
+
+# Helper to build the payload parts (text + files + pasted text)
+def _build_payload(prompt: str):
+    parts = [types.Part.from_text(text=prompt)]
+    # Include pasted texts as inline parts if present
+    if st.session_state.get("resume_text"):
+        parts.append(types.Part.from_text(text="[RESUME TEXT]
+" + st.session_state["resume_text"]))
+    if st.session_state.get("jd_text"):
+        parts.append(types.Part.from_text(text="[JD TEXT]
+" + st.session_state["jd_text"]))
+    # Include uploaded file handles (resume, JD)
+    for meta in consolidated_files:
+        parts.append(meta["file"])  # SDK accepts file parts directly
+    return parts
 
 if user_prompt:
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
@@ -248,29 +299,34 @@ if user_prompt:
 
     with st.chat_message("assistant", avatar=":material/robot_2:"):
         try:
-            contents_to_send = None
-            if st.session_state.uploaded_files:
-                ensure_active_files(client, st.session_state.uploaded_files)
-                contents_to_send = [types.Part.from_text(text=user_prompt)] + [m["file"] for m in st.session_state.uploaded_files]
+            # Gate: if either resume or JD missing, don't call the model — give a clear, single reminder.
+            need_resume = not (st.session_state.get("resume_file") or st.session_state.get("resume_text"))
+            need_jd = not (st.session_state.get("jd_file") or st.session_state.get("jd_text"))
+            if need_resume or need_jd:
+                msg = []
+                if need_resume: msg.append("**Upload your master resume** (PDF/TXT/DOCX) or paste it in the sidebar.")
+                if need_jd: msg.append("**Upload the Job Description (JD)** or paste it in the sidebar.")
+                st.markdown("
+".join(msg))
+                st.session_state.chat_history.append({"role": "assistant", "parts": "
+".join(msg)})
+            else:
+                # All inputs present — proceed to model call
+                parts = _build_payload(user_prompt)
+                with st.spinner("Thinking…"):
+                    response = st.session_state.chat.send_message(parts)
+                full_response = response.text if hasattr(response, "text") else str(response)
 
-            with st.spinner("Thinking…"):
-                if contents_to_send is None:
-                    response = st.session_state.chat.send_message(user_prompt)
-                else:
-                    response = st.session_state.chat.send_message(contents_to_send)
+                # Repetition guard
+                if too_similar(st.session_state.last_assistant_text, full_response):
+                    full_response = (
+                        "I've already covered most of that. Would you like me to (1) propose keyword Packs, "
+                        "(2) tailor your resume now, or (3) generate a concise cover letter?"
+                    )
 
-            full_response = response.text if hasattr(response, "text") else str(response)
-
-            # Repetition guard — if too similar to last assistant text, summarize+ask next step
-            if too_similar(st.session_state.last_assistant_text, full_response):
-                full_response = (
-                    "I've already covered most of that. Would you like me to (1) propose keyword Packs, "
-                    "(2) tailor your resume now, or (3) generate a concise cover letter?"
-                )
-
-            st.markdown(full_response)
-            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-            st.session_state.last_assistant_text = full_response
+                st.markdown(full_response)
+                st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+                st.session_state.last_assistant_text = full_response
 
         except Exception as e:
             st.error(f"❌ Gemini error: {e}")
