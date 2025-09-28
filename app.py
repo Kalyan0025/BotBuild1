@@ -192,6 +192,7 @@ st.session_state.setdefault("last_jd_meta", None)   # remember most recent JD fi
 st.session_state.setdefault("awaiting_pack_selection", False)
 st.session_state.setdefault("awaiting_micro_pack_selection", False)
 st.session_state.setdefault("awaiting_next_options", False)
+st.session_state.setdefault("show_next_jd_panel", False)  # <-- NEW
 st.session_state.setdefault("last_apply_output", "")
 
 # Chat config
@@ -215,6 +216,49 @@ else:
             st.session_state.chat.update(config=generation_cfg)
         except Exception:
             st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
+
+# ---------------------------
+# Core processing function (top-level so we can call it anywhere)
+# ---------------------------
+def process_with_current_resume_and_jd(client: genai.Client, jd_meta: Optional[Dict[str, Any]] = None, jd_text: str = ""):
+    """Run Pre-Score + Packs prompt with the resume on file and a JD (file or text)."""
+    command = (
+        "Run QuickScore on the provided RESUME and JD, then continue as follows:\n"
+        "1) Output PRE-SCORE with subscores (skills_fit, experience_fit, education_fit, ats_keywords_coverage) in a clear block.\n"
+        "2) List up to 4 KEYWORD PACKS (numbered 1..N) with short labels and predicted score lift.\n"
+        "3) End with: 'Reply with 1,2,3,4 or 0 for all to apply.'\n"
+        "Constraints: Keep total output under 500 words. No fabrication; use only resume + JD evidence. ATS-safe formatting."
+    )
+    parts = [types.Part.from_text(text=command)]
+    if st.session_state.get("resume_text"):
+        parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts.append(jd_meta["file"])
+
+    with st.chat_message("user", avatar="👤"):
+        st.markdown("JD provided — starting QuickScore and suggestions…")
+    st.session_state.chat_history.append({"role": "user", "parts": "JD provided — starting QuickScore and suggestions…"})
+
+    try:
+        with st.chat_message("assistant", avatar=":material/robot_2:"):
+            with st.spinner("Scoring resume ↔ JD and preparing keyword packs…"):
+                response = st.session_state.chat.send_message(parts)
+            full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
+            if too_similar(st.session_state.last_assistant_text, full_response):
+                full_response = "I've already proposed packs above. Reply with numbers (e.g., 1,3) or 0 to apply all."
+            st.markdown(full_response)
+        st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+        st.session_state.last_assistant_text = full_response
+        st.session_state["awaiting_pack_selection"] = True
+        st.session_state["awaiting_micro_pack_selection"] = False
+        st.session_state["awaiting_next_options"] = False
+        st.session_state["show_next_jd_panel"] = False
+    except Exception as e:
+        st.error(f"❌ Gemini error: {e}")
 
 # ---------------------------
 # Main Inputs (center) — resume first, then JD
@@ -252,6 +296,7 @@ with resume_container:
             st.session_state["awaiting_pack_selection"] = False
             st.session_state["awaiting_micro_pack_selection"] = False
             st.session_state["awaiting_next_options"] = False
+            st.session_state["show_next_jd_panel"] = False
             st.session_state["last_apply_output"] = ""
             st.rerun()
 
@@ -266,46 +311,6 @@ with jd_container:
             st.session_state["jd_text_temp"] = st.text_area("Or paste JD text", value=st.session_state["jd_text_temp"], height=140)
             jd_paste_click = st.button("Use This JD")
 
-        def process_with_current_resume_and_jd(jd_meta: Optional[Dict[str, Any]] = None, jd_text: str = ""):
-            # Kickoff: Pre-Score + up to 4 Packs (≤ ~500 words)
-            command = (
-                "Run QuickScore on the provided RESUME and JD, then continue as follows:\n"
-                "1) Output PRE-SCORE with subscores (skills_fit, experience_fit, education_fit, ats_keywords_coverage) in a clear block.\n"
-                "2) List up to 4 KEYWORD PACKS (numbered 1..N) with short labels and predicted score lift.\n"
-                "3) End with: 'Reply with 1,2,3,4 or 0 for all to apply.'\n"
-                "Constraints: Keep total output under 500 words. No fabrication; use only resume + JD evidence. ATS-safe formatting."
-            )
-            parts = [types.Part.from_text(text=command)]
-            if st.session_state.get("resume_text"):
-                parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-            if st.session_state.get("resume_meta"):
-                parts.append(st.session_state["resume_meta"]["file"])
-            if jd_text.strip():
-                parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
-            if jd_meta and jd_meta.get("file"):
-                parts.append(jd_meta["file"])
-
-            with st.chat_message("user", avatar="👤"):
-                st.markdown("JD provided — starting QuickScore and suggestions…")
-            st.session_state.chat_history.append({"role": "user", "parts": "JD provided — starting QuickScore and suggestions…"})
-
-            try:
-                with st.chat_message("assistant", avatar=":material/robot_2:"):
-                    with st.spinner("Scoring resume ↔ JD and preparing keyword packs…"):
-                        response = st.session_state.chat.send_message(parts)
-                    full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
-                    if too_similar(st.session_state.last_assistant_text, full_response):
-                        full_response = "I've already proposed packs above. Reply with numbers (e.g., 1,3) or 0 to apply all."
-                    st.markdown(full_response)
-                st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-                st.session_state.last_assistant_text = full_response
-                # Expect pack selection next
-                st.session_state["awaiting_pack_selection"] = True
-                st.session_state["awaiting_micro_pack_selection"] = False
-                st.session_state["awaiting_next_options"] = False
-            except Exception as e:
-                st.error(f"❌ Gemini error: {e}")
-
         # JD file upload
         if jd_up is not None:
             try:
@@ -315,14 +320,14 @@ with jd_container:
                 ensure_active_files(client, [jd_meta])
                 st.session_state["last_jd_meta"] = jd_meta  # remember file for apply stage
                 st.toast(f"JD received: {jd_up.name}")
-                process_with_current_resume_and_jd(jd_meta=jd_meta, jd_text="")
+                process_with_current_resume_and_jd(client, jd_meta=jd_meta, jd_text="")
             except Exception as e:
                 st.error(f"Upload failed for {jd_up.name}: {e}")
 
         # JD pasted
         if jd_paste_click and st.session_state["jd_text_temp"].strip():
             st.session_state["last_jd_meta"] = None  # this run uses pasted text
-            process_with_current_resume_and_jd(jd_meta=None, jd_text=st.session_state["jd_text_temp"]) 
+            process_with_current_resume_and_jd(client, jd_meta=None, jd_text=st.session_state["jd_text_temp"])
 
 # ---------------------------
 # Render prior messages
@@ -333,9 +338,42 @@ for msg in st.session_state.chat_history:
         st.markdown(msg["parts"])  # plain text
 
 # ---------------------------
+# QUICK "NEXT JD" PANEL (shows after you finish a JD)
+# ---------------------------
+if st.session_state.get("awaiting_next_options") or st.session_state.get("show_next_jd_panel"):
+    st.markdown("---")
+    st.subheader("➕ Add Next JD")
+    nj_col1, nj_col2 = st.columns(2)
+    with nj_col1:
+        next_jd_up = st.file_uploader("Upload next JD (PDF/TXT/DOCX)", ["pdf", "txt", "docx"], False, key="next_jd_up")
+    with nj_col2:
+        next_jd_text = st.text_area("Or paste next JD text", value="", height=120, key="next_jd_text")
+        next_jd_btn = st.button("Use This Next JD", type="primary", key="use_next_jd")
+
+    if next_jd_up is not None:
+        try:
+            mime = next_jd_up.type or (mimetypes.guess_type(next_jd_up.name)[0] or "application/octet-stream")
+            next_jd_gfile = client.files.upload(file=io.BytesIO(next_jd_up.getvalue()), config=types.UploadFileConfig(mime_type=mime))
+            jd_meta2 = {"name": next_jd_up.name, "size": next_jd_up.size, "mime": mime, "file": next_jd_gfile}
+            ensure_active_files(client, [jd_meta2])
+            st.session_state["last_jd_meta"] = jd_meta2
+            st.session_state["jd_text_temp"] = ""
+            st.toast(f"JD received: {next_jd_up.name}")
+            process_with_current_resume_and_jd(client, jd_meta=jd_meta2, jd_text="")
+        except Exception as e:
+            st.error(f"Upload failed for {next_jd_up.name}: {e}")
+
+    if next_jd_btn and next_jd_text.strip():
+        st.session_state["last_jd_meta"] = None
+        st.session_state["jd_text_temp"] = next_jd_text
+        process_with_current_resume_and_jd(client, jd_meta=None, jd_text=next_jd_text)
+
+# ---------------------------
 # Chat input — packs → apply → next options (inc. micro-packs + 0=next JD)
 # ---------------------------
-user_prompt = st.chat_input("Reply with packs (e.g., 1,3 or 0 for all). After apply: 1=refine with micro-packs, 0=next JD, 2=boosters, 3=export.")
+user_prompt = st.chat_input(
+    "Reply with packs (e.g., 1,3 or 0 for all). After apply: 1=micro-packs, 0=next JD, 2=boosters, 3=export."
+)
 if user_prompt:
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
     with st.chat_message("user", avatar="👤"):
@@ -351,7 +389,7 @@ if user_prompt:
     option_match = re.fullmatch(r"\s*[0123]\s*", user_prompt)
 
     try:
-        # A) APPLY PACKS (initial packs)
+        # A) APPLY PACKS (initial packs) — TWO-STEP TO AVOID TRUNCATION
         if st.session_state.get("awaiting_pack_selection") and pack_match:
             selection = user_prompt.strip()
 
@@ -408,6 +446,7 @@ if user_prompt:
             st.session_state["awaiting_pack_selection"] = False
             st.session_state["awaiting_micro_pack_selection"] = False
             st.session_state["awaiting_next_options"] = True
+            st.session_state["show_next_jd_panel"] = True  # show quick panel
             st.session_state["last_assistant_text"] = st.session_state["last_apply_output"]
             st.session_state.chat_history.append({"role": "assistant", "parts": st.session_state["last_apply_output"]})
 
@@ -440,17 +479,20 @@ if user_prompt:
                 st.session_state.last_assistant_text = full_response
                 st.session_state["awaiting_next_options"] = False
                 st.session_state["awaiting_micro_pack_selection"] = True
+                st.session_state["show_next_jd_panel"] = False
 
             elif choice == "0":
-                # Next JD (reset JD inputs but keep resume)
+                # Next JD (reset JD inputs but keep resume) — and jump to quick panel
                 with st.chat_message("assistant", avatar=":material/robot_2:"):
                     st.markdown("Upload/paste the **next JD** — I’ll reuse your master resume on file.")
                 st.session_state.chat_history.append({"role": "assistant", "parts": "Proceed with next JD."})
                 st.session_state.last_assistant_text = "Proceed with next JD."
-                st.session_state["awaiting_next_options"] = False
+                st.session_state["awaiting_next_options"] = True
                 st.session_state["awaiting_micro_pack_selection"] = False
                 st.session_state["jd_text_temp"] = ""
                 st.session_state["last_jd_meta"] = None
+                st.session_state["show_next_jd_panel"] = True
+                st.rerun()  # <-- bring the panel into view immediately
 
             elif choice == "2":
                 # Minor boosters — no new packs
@@ -476,6 +518,7 @@ if user_prompt:
                 st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
                 st.session_state.last_assistant_text = full_response
                 st.session_state["awaiting_next_options"] = True
+                st.session_state["show_next_jd_panel"] = True
 
             elif choice == "3":
                 with st.chat_message("assistant", avatar=":material/robot_2:"):
@@ -492,6 +535,7 @@ if user_prompt:
                 st.session_state.chat_history.append({"role": "assistant", "parts": "Export option shown."})
                 st.session_state.last_assistant_text = "Export option shown."
                 st.session_state["awaiting_next_options"] = True
+                st.session_state["show_next_jd_panel"] = True
 
         # C) APPLY MICRO-PACKS (numbers or 0 to apply all) after option 1
         elif st.session_state.get("awaiting_micro_pack_selection") and pack_match:
@@ -543,6 +587,7 @@ if user_prompt:
             st.session_state["last_apply_output"] = (resume_only2.rstrip() + "\n\n" + rest2.lstrip()).strip()
             st.session_state["awaiting_micro_pack_selection"] = False
             st.session_state["awaiting_next_options"] = True
+            st.session_state["show_next_jd_panel"] = True
             st.session_state["last_assistant_text"] = st.session_state["last_apply_output"]
             st.session_state.chat_history.append({"role": "assistant", "parts": st.session_state["last_apply_output"]})
 
