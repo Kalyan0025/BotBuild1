@@ -5,6 +5,7 @@
 
 import io
 import time
+import re
 import mimetypes
 from difflib import SequenceMatcher
 from typing import List, Dict, Any, Optional
@@ -63,16 +64,17 @@ def load_default_identity() -> str:
         "- Be concise, confident, and non-repetitive.\n"
         "- If you are about to repeat the same guidance as the previous turn, instead summarize in one line and ask what to refine.\n"
         "- Persist the user's master resume for the session; whenever a new JD is provided, immediately tailor the resume to it.\n"
+        "- Always return a non-empty response — never output 'None'.\n"
     )
 
 
 def parse_xmlish_instr(txt: str) -> str:
     """Extracts <Role>, <Goal>, <Rules>, <Knowledge>, <SpecializedActions>, <Guidelines> into one system instruction string."""
-    import re
+    import re as _re
     sections = ["Role", "Goal", "Rules", "Knowledge", "SpecializedActions", "Guidelines"]
     chunks = []
     for tag in sections:
-        m = re.search(fr"<{tag}>(.*?)</{tag}>", txt, flags=re.DOTALL | re.IGNORECASE)
+        m = _re.search(fr"<{tag}>(.*?)</{tag}>", txt, flags=_re.DOTALL | _re.IGNORECASE)
         if m:
             chunks.append(f"{tag}:\n{m.group(1).strip()}\n\n")
     return "".join(chunks).strip() or load_default_identity()
@@ -248,37 +250,38 @@ with jd_container:
 
         # Auto-run when JD file is uploaded, or when paste button clicked
         def process_with_current_resume_and_jd(jd_meta: Optional[Dict[str,Any]] = None, jd_text: str = ""):
-            # Build parts: user command + resume + JD
-            command = "Tailor my resume to this job description."
+            # Compose an explicit, deterministic instruction to kick off the pipeline
+            command = (
+                """
+Run QuickScore on the provided RESUME and JD, then continue as follows:
+1) Output PRE-SCORE with subscores (skills_fit, experience_fit, education_fit, ats_keywords_coverage) in a clear block.
+2) List KEYWORD PACKS (numbered 1..N) with short labels and predicted score lift.
+3) End with: 'Reply with 1,2,3 or 0 for all to apply.'
+Rules: No fabrication; use only evidence from the resume + JD. Keep it concise and ATS-safe.
+                """
+            )
             parts = [types.Part.from_text(text=command)]
-
-            # Include resume text if present
             if st.session_state.get("resume_text"):
                 parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-            # Include resume file if present
             if st.session_state.get("resume_meta"):
-                parts.append(st.session_state["resume_meta"]["file"])  # Gemini file part
-
-            # Include JD text/file
+                parts.append(st.session_state["resume_meta"]["file"])
             if jd_text.strip():
                 parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
             if jd_meta and jd_meta.get("file"):
-                parts.append(jd_meta["file"])  # Gemini file part
+                parts.append(jd_meta["file"])
 
             with st.chat_message("user", avatar="👤"):
-                st.markdown("JD provided — tailor the resume.")
-            st.session_state.chat_history.append({"role": "user", "parts": "JD provided — tailor the resume."})
+                st.markdown("JD provided — starting QuickScore and suggestions…")
+            st.session_state.chat_history.append({"role": "user", "parts": "JD provided — starting QuickScore and suggestions…"})
 
             try:
                 with st.chat_message("assistant", avatar=":material/robot_2:"):
-                    with st.spinner("Tailoring your resume…"):
+                    with st.spinner("Scoring resume ↔ JD and preparing keyword packs…"):
                         response = st.session_state.chat.send_message(parts)
-                    full_response = response.text if hasattr(response, "text") else str(response)
-
-                    # repetition guard
+                    full_response = getattr(response, "text", None) or (str(response) if response else "[No content returned]")
                     if too_similar(st.session_state.last_assistant_text, full_response):
                         full_response = (
-                            "I've already covered most of that. Want me to (1) propose keyword Packs, (2) regenerate with different focus, or (3) draft a concise cover letter?)"
+                            "I've already proposed packs above. Reply with numbers (e.g., 1,3) or 0 to apply all."
                         )
                     st.markdown(full_response)
                 st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
@@ -313,38 +316,66 @@ for msg in st.session_state.chat_history:
 # ---------------------------
 # Open chat input for follow-ups
 # ---------------------------
-user_prompt = st.chat_input("Ask follow‑ups (e.g., 'show keyword packs', 'generate cover letter')…")
+user_prompt = st.chat_input("Reply with packs to apply (e.g., 1,3 or 0 for all), or ask follow‑ups…")
 if user_prompt:
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
     with st.chat_message("user", avatar="👤"):
         st.markdown(user_prompt)
 
-    # If user asks to tailor but resume missing, nudge
+    # If no resume yet, nudge
     need_resume = not (st.session_state.get("resume_meta") or st.session_state.get("resume_text"))
     if need_resume:
         with st.chat_message("assistant", avatar=":material/robot_2:"):
-            st.markdown("Please upload your **Master Resume** first above. Once it's stored, add a JD and I'll tailor it immediately.")
+            st.markdown("Please upload your **Master Resume** first above. Then add a JD; I’ll score and propose packs.")
         st.stop()
 
-    # Otherwise, send to model with whatever context exists
+    # Detect a pack selection like '0' or '1,3,4'
+    pack_match = re.fullmatch(r"\s*0\s*|\s*(\d+\s*(,\s*\d+\s*)*)\s*", user_prompt)
+
     try:
-        parts = [types.Part.from_text(text=user_prompt)]
-        if st.session_state.get("resume_text"):
-            parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-        if st.session_state.get("resume_meta"):
-            parts.append(st.session_state["resume_meta"]["file"])  # resume file
-        if st.session_state.get("jd_text_temp"):
-            parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
-        with st.chat_message("assistant", avatar=":material/robot_2:"):
-            with st.spinner("Thinking…"):
-                response = st.session_state.chat.send_message(parts)
-            full_response = response.text if hasattr(response, "text") else str(response)
-            if too_similar(st.session_state.last_assistant_text, full_response):
-                full_response = (
-                    "I've already covered most of that. Want me to (1) propose keyword Packs, (2) regenerate with different focus, or (3) draft a concise cover letter?)"
-                )
-            st.markdown(full_response)
-        st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-        st.session_state.last_assistant_text = full_response
+        if pack_match:
+            # Tell the model to apply packs and finish the flow
+            selection = user_prompt.strip()
+            apply_cmd = (
+                "ApplySuggestions with the selected packs: '" + selection + "'. "
+                "Then generate: (a) the tailored ATS-safe resume, (b) Post-Score with delta vs Pre-Score, "
+                "(c) a concise evidence-based cover letter (180–250 words), and (d) a short Change Log (before→after bullets). "
+                "If metrics are missing, insert <METRIC_TBD> and list 3 micro-questions via AskForMetrics at the end."
+            )
+            parts = [types.Part.from_text(text=apply_cmd)]
+            if st.session_state.get("resume_text"):
+                parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+            if st.session_state.get("resume_meta"):
+                parts.append(st.session_state["resume_meta"]["file"])  # resume file
+            if st.session_state.get("jd_text_temp"):
+                parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
+
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                with st.spinner("Applying your selections and generating outputs…"):
+                    response = st.session_state.chat.send_message(parts)
+                full_response = getattr(response, "text", None) or (str(response) if response else "[No content returned]")
+                if too_similar(st.session_state.last_assistant_text, full_response):
+                    full_response = "Outputs generated above. Want me to export a plain-text file?"
+                st.markdown(full_response)
+            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+            st.session_state.last_assistant_text = full_response
+        else:
+            # General follow-up: include resume + current JD text context
+            parts = [types.Part.from_text(text=user_prompt)]
+            if st.session_state.get("resume_text"):
+                parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+            if st.session_state.get("resume_meta"):
+                parts.append(st.session_state["resume_meta"]["file"])  # resume file
+            if st.session_state.get("jd_text_temp"):
+                parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                with st.spinner("Thinking…"):
+                    response = st.session_state.chat.send_message(parts)
+                full_response = getattr(response, "text", None) or (str(response) if response else "[No content returned]")
+                if too_similar(st.session_state.last_assistant_text, full_response):
+                    full_response = "I've covered that above. Want me to export, or propose boosters?"
+                st.markdown(full_response)
+            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
+            st.session_state.last_assistant_text = full_response
     except Exception as e:
         st.error(f"❌ Gemini error: {e}")
