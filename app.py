@@ -7,7 +7,6 @@
 
 import io
 import time
-import re
 import mimetypes
 from typing import List, Dict, Any, Optional
 
@@ -63,8 +62,8 @@ Rules:
 
 
 def parse_xmlish_instr(txt: str) -> str:
-    """Extracts <Role>, <Goal>, <Rules>, <Knowledge>, <SpecializedActions>, <Guidelines>
-    into one system string. Avoids f-strings entirely.
+    """Extract <Role>, <Goal>, <Rules>, <Knowledge>, <SpecializedActions>, <Guidelines> into one system string.
+    (No f-strings to avoid copy/paste quote issues.)
     """
     import re as _re
     sections = ["Role", "Goal", "Rules", "Knowledge", "SpecializedActions", "Guidelines"]
@@ -186,7 +185,8 @@ except Exception as e:
     st.error("Failed to init Gemini client. Set GEMINI_API_KEY in Streamlit secrets.\n" + str(e))
     st.stop()
 
-st.session_state.setdefault("chat_history", [])  # **store only USER messages to prevent duplicate renders**
+# Persist only user prompts (no assistant echoes)
+st.session_state.setdefault("chat_history", [])
 
 # Persisted resume for the session
 st.session_state.setdefault("resume_meta", None)    # {name,size,mime,file}
@@ -200,11 +200,16 @@ st.session_state.setdefault("last_jd_meta", None)
 st.session_state.setdefault("stage", "idle")  # idle | options | awaiting_packs | awaiting_ab_choice | awaiting_level
 st.session_state.setdefault("last_outputs", {})  # {"resume": str, "post": str}
 
+# Action outputs to persist across reruns
+st.session_state.setdefault("packs_text", "")
+st.session_state.setdefault("ab_variants_text", "")
+
 # On-demand tool sub-states
-st.session_state.setdefault("awaiting_ab_bullet", False)
-st.session_state.setdefault("awaiting_ab_choice", False)
-st.session_state.setdefault("awaiting_level_choice", False)
 st.session_state.setdefault("custom_refine_text", "")
+st.session_state.setdefault("_apply_selection", None)
+st.session_state.setdefault("_ab_choice", None)
+st.session_state.setdefault("_level_choice", None)
+st.session_state.setdefault("show_next_jd_panel", False)
 
 # Chat config
 search_tool = types.Tool(google_search=types.GoogleSearch())
@@ -217,27 +222,20 @@ generation_cfg = types.GenerateContentConfig(
     max_output_tokens=int(max_tokens),
     response_mime_type="text/plain",
 )
-if "chat" not in st.session_state:
-    st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
-else:
-    if getattr(st.session_state.chat, "model", None) != model_name:
-        st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
-    else:
-        try:
-            st.session_state.chat.update(config=generation_cfg)
-        except Exception:
-            st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
 
 # ---------------------------
-# Core prompt senders
+# Core prompt sender (isolated per call to avoid old context bleed)
 # ---------------------------
-
 def send(parts: List[Any]) -> str:
     # filter out Nones to avoid SDK issues
     parts = [p for p in parts if p is not None]
-    resp = st.session_state.chat.send_message(parts)
+    chat = client.chats.create(model=model_name, config=generation_cfg)  # fresh chat every call
+    resp = chat.send_message(parts)
     return extract_text_from_response(resp) or ""
 
+# ---------------------------
+# Model prompts
+# ---------------------------
 
 def autotailor_resume_only(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
     cmd = """AutoTailorNow:
@@ -246,7 +244,7 @@ def autotailor_resume_only(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> s
 - Convert implied matches into exact JD phrasing only when evidence exists.
 - Reorder bullets so JD-critical items appear first; compress low-relevance content.
 - Keep ATS-safe plain text, single column; insert <METRIC_TBD> where numbers are missing.
-- Output ONLY the tailored resume (plain text). Do not include explanations.
+- Output ONLY the tailored resume (plain text). Do not include explanations or a cover letter.
 - End with exactly: [END_RESUME]"""
     parts: List[Any] = [types.Part.from_text(text=cmd)]
     if st.session_state.get("resume_text"):
@@ -265,6 +263,7 @@ def poststep_scores_and_proofs(jd_meta: Optional[Dict[str, Any]], jd_text: str) 
 - Compute PRE-SCORE (overall + subscores) and POST-SCORE (overall + subscores); show Δ.
 - Evidence Map (mini): 4–6 lines mapping {JD anchor → matching resume bullet fragment}. Use short quotes only.
 - Change Log (max 6 bullets): before→after with a one-clause 'why' tied to the JD.
+- Do NOT include a cover letter.
 - At the end, print on separate lines:
 NEW MATCH %: <overall-post>
 NEXT OPTIONS: [1] Improve further (3 targeted packs), [2] Minor boosters, [3] Coverage Board, [4] Narrative presets, [5] A/B Bullet, [6] Level calibrator, [7] Export .txt, [0] Next JD"""
@@ -286,6 +285,7 @@ def suggest_three_packs(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
 - Each pack must be fully evidenced by the tailored resume and JD; exclude anything without proof.
 - For each pack, include: short label, tokens/phrases, JD anchor (short quote), resume anchor (short quote), predicted lift (+2–6%).
 - Keep under 180 words total.
+- Do NOT include a cover letter.
 - End with: Reply with 1,2 or 0 to apply all."""
     parts: List[Any] = [types.Part.from_text(text=cmd)]
     if st.session_state.get("resume_text"):
@@ -302,7 +302,7 @@ def suggest_three_packs(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
 def apply_selected_packs(selection: str, jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
     cmd_a = (
         "ApplySuggestions with the selected refinement packs: '" + selection + "'. "
-        "Output ONLY the updated ATS-safe resume (plain text) and end with: [END_RESUME]"
+        "Output ONLY the updated ATS-safe resume (plain text). Do not include explanations or a cover letter. End with: [END_RESUME]"
     )
     parts_a: List[Any] = [types.Part.from_text(text=cmd_a)]
     if st.session_state.get("resume_text"):
@@ -318,6 +318,7 @@ def apply_selected_packs(selection: str, jd_meta: Optional[Dict[str, Any]], jd_t
 
 def post_after_apply(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
     cmd_b = """Now output only: POST-SCORE (overall 0–100) and Δ vs previous; a very short Change Log (max 4 bullets).
+Do NOT include a cover letter.
 At the end print:
 NEW MATCH %: <overall>
 NEXT OPTIONS: [1] Improve further (3 targeted packs), [2] Minor boosters, [3] Coverage Board, [4] Narrative presets, [5] A/B Bullet, [6] Level calibrator, [7] Export .txt, [0] Next JD"""
@@ -338,7 +339,7 @@ def minor_boosters(jd_meta: Optional[Dict[str, Any]], jd_text: str, user_brief: 
     cmd = (
         "BoostScore(): Suggest 3–6 minor booster edits to the tailored resume above without proposing new keywords. "
         "Focus on phrasing, ordering, and quantification (<METRIC_TBD>), alignment tweaks." + extra +
-        " End with exactly three micro-questions asking for missing metric values."
+        " Do NOT include a cover letter. End with exactly three micro-questions asking for missing metric values."
     )
     parts: List[Any] = [types.Part.from_text(text=cmd)]
     if st.session_state.get("resume_text"):
@@ -356,7 +357,8 @@ def coverage_board(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
     cmd = """Coverage Board:
 - Group into Must-Have (role-critical), Nice-to-Have (differentiators), and Avoid/Exposure (no evidence).
 - For each item: JD anchor (short quote), resume anchor (short quote), placement (Summary/Skills/Role bullet), risk flag, predicted lift (+%).
-- Keep total under 220 words."""
+- Keep total under 220 words.
+- Do NOT include a cover letter."""
     parts: List[Any] = [types.Part.from_text(text=cmd)]
     if st.session_state.get("resume_text"):
         parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
@@ -373,7 +375,8 @@ def narrative_presets(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
     cmd = """NarrativePresetGuide:
 - Present 3–4 presets (Impact-First / Research-Forward / Systems & Accessibility / Product Partnering).
 - For each: 1–2 tone rules and a single sample bullet rewrite drawn from the tailored resume.
-- No new tools/titles; keep ATS-safe. Max 180 words."""
+- No new tools/titles; keep ATS-safe. Max 180 words.
+- Do NOT include a cover letter."""
     parts: List[Any] = [types.Part.from_text(text=cmd)]
     if st.session_state.get("resume_text"):
         parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
@@ -391,7 +394,8 @@ def ab_bullet_variants(jd_meta: Optional[Dict[str, Any]], jd_text: str, bullet_t
         "ABullet:\n"
         "- Rewrite this single bullet in three variants (A/B/C), each in a different preset (Impact-First, Research-Forward, Systems/Accessibility): '''"
         + bullet_text + "'''.\n"
-        "- Keep facts/tools/titles as-is; ATS-safe; no fabrication. Return clearly labeled A, B, C."
+        "- Keep facts/tools/titles as-is; ATS-safe; no fabrication. Return clearly labeled A, B, C.\n"
+        "- Do NOT include a cover letter."
     )
     parts: List[Any] = [types.Part.from_text(text=cmd)]
     if st.session_state.get("resume_text"):
@@ -408,7 +412,8 @@ def ab_bullet_variants(jd_meta: Optional[Dict[str, Any]], jd_text: str, bullet_t
 def apply_ab_choice(jd_meta: Optional[Dict[str, Any]], jd_text: str, chosen_text: str) -> str:
     cmd_a = (
         "Integrate the chosen rewritten bullet into the tailored resume above, replacing the most relevant original bullet only. "
-        "Keep everything ATS-safe; do not fabricate. Output ONLY the updated resume and end with: [END_RESUME]\n"
+        "Keep everything ATS-safe; do not fabricate. Output ONLY the updated resume and end with: [END_RESUME]. "
+        "Do NOT include a cover letter.\n"
         "Chosen bullet: '''" + chosen_text + "'''"
     )
     parts_a: List[Any] = [types.Part.from_text(text=cmd_a)]
@@ -428,7 +433,8 @@ def level_calibrator_prompt(jd_meta: Optional[Dict[str, Any]], jd_text: str, lev
     cmd_a = (
         "LevelCalibrator:\n"
         "- Reframe scope language for a " + level + " lens (ownership verbs, impact scale, collaboration framing) without adding new facts.\n"
-        "- Keep ATS-safe and evidence-aligned. Output ONLY the updated resume; end with: [END_RESUME]"
+        "- Keep ATS-safe and evidence-aligned. Output ONLY the updated resume; end with: [END_RESUME]. "
+        "Do NOT include a cover letter."
     )
     parts_a: List[Any] = [types.Part.from_text(text=cmd_a)]
     if st.session_state.get("resume_text"):
@@ -442,14 +448,14 @@ def level_calibrator_prompt(jd_meta: Optional[Dict[str, Any]], jd_text: str, lev
     return send(parts_a)
 
 # ---------------------------
-# AutoTailor kickoff (single place). No assistant messages are stored in chat_history → prevents duplicates.
+# AutoTailor kickoff
 # ---------------------------
 
 def run_autotailor_flow(jd_meta: Optional[Dict[str, Any]], jd_text: str):
     with st.chat_message("user", avatar="👤"):
         st.markdown("JD provided — AutoTailor in progress…")
 
-    # Step A — resume only (with auto-continue safety)
+    # A) Tailored resume (with auto-continue to reach [END_RESUME])
     with st.chat_message("assistant", avatar=":material/robot_2:"):
         with st.spinner("Tailoring resume to JD…"):
             resume_part = autotailor_resume_only(jd_meta, jd_text)
@@ -471,7 +477,7 @@ def run_autotailor_flow(jd_meta: Optional[Dict[str, Any]], jd_text: str):
         combined = trim_after_end_resume(combined)
         st.markdown(combined)
 
-    # Step B — scores + proofs + options
+    # B) Scores + proofs + options
     with st.chat_message("assistant", avatar=":material/robot_2:"):
         with st.spinner("Scoring and preparing evidence…"):
             rest = poststep_scores_and_proofs(jd_meta, jd_text)
@@ -479,6 +485,12 @@ def run_autotailor_flow(jd_meta: Optional[Dict[str, Any]], jd_text: str):
 
     st.session_state["last_outputs"] = {"resume": combined, "post": rest}
     st.session_state["stage"] = "options"
+    # Clear action caches
+    st.session_state["packs_text"] = ""
+    st.session_state["ab_variants_text"] = ""
+    st.session_state["_apply_selection"] = None
+    st.session_state["_ab_choice"] = None
+    st.session_state["_level_choice"] = None
 
 # ---------------------------
 # Main Inputs (center)
@@ -526,7 +538,7 @@ with jd_container:
             jd_up = st.file_uploader("Upload JD (PDF/TXT/DOCX)", ["pdf", "txt", "docx"], False, key="jd_uploader_center")
         with col2:
             st.session_state["jd_text_temp"] = st.text_area("Or paste JD text", value=st.session_state["jd_text_temp"], height=140)
-            jd_paste_click = st.button("Use This JD")
+            jd_paste_click = st.button("Use This JD", type="primary")
 
         if jd_up is not None:
             try:
@@ -581,24 +593,24 @@ if st.session_state.get("stage") == "options":
     btn_export = d3.button("Export .txt")
     btn_nextjd = d4.button("Next JD")
 
-    # --- Handlers
+    # --- Click handlers (store outputs in session_state)
     if btn_improve:
         with st.chat_message("assistant", avatar=":material/robot_2:"):
             with st.spinner("Preparing three targeted, evidence-backed packs…"):
-                out = suggest_three_packs(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp", ""))
-            st.markdown(out)
-            st.info("Apply selection:")
-            e1, e2, e3, e4 = st.columns([1, 1, 1, 2])
-            if e1.button("Apply 1"): st.session_state["_apply_selection"] = "1"
-            if e2.button("Apply 2"): st.session_state["_apply_selection"] = "2"
-            if e3.button("Apply 3"): st.session_state["_apply_selection"] = "3"
-            if e4.button("Apply all (0)"): st.session_state["_apply_selection"] = "0"
+                st.session_state["packs_text"] = suggest_three_packs(
+                    st.session_state.get("last_jd_meta"),
+                    st.session_state.get("jd_text_temp", "")
+                )
         st.session_state["stage"] = "awaiting_packs"
 
     if btn_boost:
         with st.chat_message("assistant", avatar=":material/robot_2:"):
             with st.spinner("Suggesting minor boosters…"):
-                out = minor_boosters(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp", ""), st.session_state.get("custom_refine_text", ""))
+                out = minor_boosters(
+                    st.session_state.get("last_jd_meta"),
+                    st.session_state.get("jd_text_temp", ""),
+                    st.session_state.get("custom_refine_text", "")
+                )
             st.markdown(out)
 
     if btn_coverage:
@@ -612,32 +624,19 @@ if st.session_state.get("stage") == "options":
                 st.markdown(narrative_presets(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp", "")))
 
     if btn_ab:
-        with st.chat_message("assistant", avatar=":material/robot_2:"):
-            st.markdown("Paste the **single bullet** below, then click *Generate A/B/C*.")
-            bullet_text = st.text_area("Bullet to rewrite", height=80, key="ab_bullet_text")
-            if st.button("Generate A/B/C") and bullet_text.strip():
-                with st.spinner("Creating variants…"):
-                    out = ab_bullet_variants(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp", ""), bullet_text)
-                st.markdown(out)
-                g1, g2, g3 = st.columns(3)
-                if g1.button("Use A"): st.session_state["_ab_choice"] = "A"
-                if g2.button("Use B"): st.session_state["_ab_choice"] = "B"
-                if g3.button("Use C"): st.session_state["_ab_choice"] = "C"
-                st.session_state["stage"] = "awaiting_ab_choice"
+        # Open the A/B tool UI; persist stage
+        st.session_state["ab_variants_text"] = ""
+        st.session_state["stage"] = "awaiting_ab_choice"
 
     if btn_level:
-        with st.chat_message("assistant", avatar=":material/robot_2:"):
-            st.markdown("Choose a level to reframe scope safely:")
-            l1, l2, l3 = st.columns(3)
-            if l1.button("junior"): st.session_state["_level_choice"] = "junior"
-            if l2.button("mid"): st.session_state["_level_choice"] = "mid"
-            if l3.button("senior"): st.session_state["_level_choice"] = "senior"
-            st.session_state["stage"] = "awaiting_level"
+        st.session_state["_level_choice"] = None
+        st.session_state["stage"] = "awaiting_level"
 
     if btn_export:
         with st.chat_message("assistant", avatar=":material/robot_2:"):
             if st.session_state.get("last_outputs"):
-                bundle = (st.session_state["last_outputs"].get("resume", "") + "\n\n" + st.session_state["last_outputs"].get("post", "")).strip()
+                bundle = (st.session_state["last_outputs"].get("resume", "") + "\n\n" +
+                          st.session_state["last_outputs"].get("post", "")).strip()
                 st.download_button(
                     "Download tailored resume + evidence (.txt)",
                     data=bundle.encode("utf-8"),
@@ -649,21 +648,33 @@ if st.session_state.get("stage") == "options":
                 st.markdown("No recent outputs to export. Run AutoTailor first.")
 
     if btn_nextjd:
-        st.session_state["stage"] = "options"  # keep options visible
         st.session_state["jd_text_temp"] = ""
         st.session_state["last_jd_meta"] = None
         st.session_state["show_next_jd_panel"] = True
         st.toast("Scroll down to '+ Add Next JD' to submit another role.")
 
 # ---------------------------
-# Handle follow-up sub-stages from buttons
+# Persistent sub-stages (render outside handlers so they survive reruns)
 # ---------------------------
+
+# Pack selection stage
+if st.session_state.get("stage") == "awaiting_packs":
+    with st.chat_message("assistant", avatar=":material/robot_2:"):
+        if st.session_state.get("packs_text"):
+            st.markdown(st.session_state["packs_text"])
+        st.info("Apply selection:")
+        e1, e2, e3, e4 = st.columns([1, 1, 1, 2])
+        if e1.button("Apply 1"): st.session_state["_apply_selection"] = "1"
+        if e2.button("Apply 2"): st.session_state["_apply_selection"] = "2"
+        if e3.button("Apply 3"): st.session_state["_apply_selection"] = "3"
+        if e4.button("Apply all (0)"): st.session_state["_apply_selection"] = "0"
+
+# When an apply selection is made, update resume and scores
 if st.session_state.get("stage") == "awaiting_packs" and st.session_state.get("_apply_selection"):
     sel = st.session_state.pop("_apply_selection")
     with st.chat_message("assistant", avatar=":material/robot_2:"):
         with st.spinner("Applying selected packs — updating resume…"):
             resume_only = apply_selected_packs(sel, st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp", ""))
-        # ensure full resume
         combined = resume_only
         tries = 0
         while not ends_with_end_resume(combined) and tries < 3:
@@ -685,7 +696,28 @@ if st.session_state.get("stage") == "awaiting_packs" and st.session_state.get("_
             rest = post_after_apply(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp", ""))
         st.markdown(rest)
     st.session_state["last_outputs"] = {"resume": combined, "post": rest}
+    # Return to options and clear pack cache
+    st.session_state["packs_text"] = ""
     st.session_state["stage"] = "options"
+
+# A/B Bullet stage (persistent)
+if st.session_state.get("stage") == "awaiting_ab_choice":
+    with st.chat_message("assistant", avatar=":material/robot_2:"):
+        st.markdown("Paste the **single bullet** below, then click *Generate A/B/C*.")
+        bullet_text = st.text_area("Bullet to rewrite", height=80, key="ab_bullet_text")
+        if st.button("Generate A/B/C"):
+            with st.spinner("Creating variants…"):
+                st.session_state["ab_variants_text"] = ab_bullet_variants(
+                    st.session_state.get("last_jd_meta"),
+                    st.session_state.get("jd_text_temp", ""),
+                    bullet_text or ""
+                )
+        if st.session_state.get("ab_variants_text"):
+            st.markdown(st.session_state["ab_variants_text"])
+            g1, g2, g3 = st.columns(3)
+            if g1.button("Use A"): st.session_state["_ab_choice"] = "A"
+            if g2.button("Use B"): st.session_state["_ab_choice"] = "B"
+            if g3.button("Use C"): st.session_state["_ab_choice"] = "C"
 
 if st.session_state.get("stage") == "awaiting_ab_choice" and st.session_state.get("_ab_choice"):
     choice = st.session_state.pop("_ab_choice")
@@ -697,7 +729,17 @@ if st.session_state.get("stage") == "awaiting_ab_choice" and st.session_state.ge
             post = post_after_apply(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp", ""))
         st.markdown(post)
     st.session_state["last_outputs"] = {"resume": updated, "post": post}
+    st.session_state["ab_variants_text"] = ""
     st.session_state["stage"] = "options"
+
+# Level calibrator stage (persistent)
+if st.session_state.get("stage") == "awaiting_level":
+    with st.chat_message("assistant", avatar=":material/robot_2:"):
+        st.markdown("Choose a level to reframe scope safely:")
+        l1, l2, l3 = st.columns(3)
+        if l1.button("junior"): st.session_state["_level_choice"] = "junior"
+        if l2.button("mid"): st.session_state["_level_choice"] = "mid"
+        if l3.button("senior"): st.session_state["_level_choice"] = "senior"
 
 if st.session_state.get("stage") == "awaiting_level" and st.session_state.get("_level_choice"):
     level = st.session_state.pop("_level_choice")
@@ -712,7 +754,7 @@ if st.session_state.get("stage") == "awaiting_level" and st.session_state.get("_
     st.session_state["stage"] = "options"
 
 # ---------------------------
-# Bottom “Next JD” panel — always visible once options are shown
+# Bottom “Next JD” panel — visible once options are shown / toggled
 # ---------------------------
 if st.session_state.get("stage") in ("options", "awaiting_packs", "awaiting_ab_choice", "awaiting_level") or st.session_state.get("show_next_jd_panel"):
     st.markdown("---")
