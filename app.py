@@ -1,6 +1,7 @@
-# ReadySetRole — Simple Gemini Chatbot (Streamlit)
-# Stage-tracked flow; robust parsing; resume persisted for session
-# Two-step Apply: (A) Resume only (+auto-continue) → (B) Post-Score + Letter + Change Log + Next Options
+# ReadySetRole — AutoTailor Flow (Streamlit + Gemini)
+# Core: AutoTailor → PostScore (with Evidence Map + Change Log) → Options
+# On-demand tools: Targeted packs, Minor boosters, Coverage Board, Narrative presets,
+# A/B Bullet rewriter, Level calibrator, Export, Next JD
 # License note per template:
 # "This code uses portions of code developed by Ronald A. Beghetto for a course taught at Arizona State University."
 
@@ -61,7 +62,6 @@ def load_default_identity() -> str:
     )
 
 def parse_xmlish_instr(txt: str) -> str:
-    """Extract <Role>, <Goal>, <Rules>, <Knowledge>, <SpecializedActions>, <Guidelines> into one system string."""
     import re as _re
     sections = ["Role", "Goal", "Rules", "Knowledge", "SpecializedActions", "Guidelines"]
     chunks = []
@@ -94,7 +94,6 @@ def too_similar(a: str, b: str, threshold: float = 0.90) -> bool:
     return ratio >= threshold
 
 def extract_text_from_response(resp) -> str:
-    """Robustly extract text across SDK variants; avoid printing raw Candidate objects."""
     try:
         t = getattr(resp, "text", None)
         if t:
@@ -124,7 +123,7 @@ def trim_after_end_resume(text: str) -> str:
     return text[:idx + len("[END_RESUME]")]
 
 # ---------------------------
-# Sidebar (settings only — no uploads)
+# Sidebar (settings only)
 # ---------------------------
 with st.sidebar:
     st.title("⚙️ Controls")
@@ -141,11 +140,10 @@ with st.sidebar:
     temperature = st.slider("temperature", 0.0, 1.0, 0.2, 0.05)
     top_p = st.slider("top_p", 0.0, 1.0, 0.9, 0.05)
     top_k = st.slider("top_k", 1, 100, 40, 1)
-    max_tokens = st.number_input("max_output_tokens", min_value=512, max_value=4096, value=3584, step=64)
-    concise_mode = st.toggle("Concise mode (short answers)", value=True, help="Adds extra brevity hints to the system instruction")
+    max_tokens = st.number_input("max_output_tokens", 512, 4096, 3584, 64)
+    concise_mode = st.toggle("Concise mode (short answers)", value=True)
 
     st.divider()
-
     st.markdown("### System Instructions")
     instr_src = st.radio("Load instructions from:", ["identity.txt", "Paste inline"], index=1, horizontal=True)
     pasted = ""
@@ -187,16 +185,22 @@ st.session_state.setdefault("last_assistant_text", "")
 
 # Persisted resume for the session
 st.session_state.setdefault("resume_meta", None)    # {name,size,mime,file}
-st.session_state.setdefault("resume_text", "")      # optional pasted text
+st.session_state.setdefault("resume_text", "")      # pasted text
 
 # JD + flow state
 st.session_state.setdefault("jd_text_temp", "")
-st.session_state.setdefault("last_jd_meta", None)   # remember most recent JD file
-st.session_state.setdefault("awaiting_pack_selection", False)
-st.session_state.setdefault("awaiting_micro_pack_selection", False)
+st.session_state.setdefault("last_jd_meta", None)
 st.session_state.setdefault("awaiting_next_options", False)
-st.session_state.setdefault("show_next_jd_panel", False)  # NEW: bottom quick panel
+st.session_state.setdefault("show_next_jd_panel", False)
 st.session_state.setdefault("last_apply_output", "")
+
+# On-demand tool states
+st.session_state.setdefault("awaiting_refine_pack_selection", False)  # for option [1]
+st.session_state.setdefault("awaiting_ab_bullet", False)              # for option [5]
+st.session_state.setdefault("awaiting_ab_choice", False)              # choice A/B/C
+st.session_state.setdefault("ab_variants", {})                        # store A/B/C text
+st.session_state.setdefault("awaiting_level_choice", False)           # for option [6]
+st.session_state.setdefault("custom_refine_text", "")                 # optional brief for boosters
 
 # Chat config
 search_tool = types.Tool(google_search=types.GoogleSearch())
@@ -221,18 +225,24 @@ else:
             st.session_state.chat = client.chats.create(model=model_name, config=generation_cfg)
 
 # ---------------------------
-# Core kickoff (so we can call it from top or bottom)
+# Core prompts as functions
 # ---------------------------
-def process_with_current_resume_and_jd(jd_meta: Optional[Dict[str, Any]] = None, jd_text: str = ""):
-    """Run Pre-Score + Packs with resume on file and a JD (file or text)."""
-    command = (
-        "Run QuickScore on the provided RESUME and JD, then continue as follows:\n"
-        "1) Output PRE-SCORE with subscores (skills_fit, experience_fit, education_fit, ats_keywords_coverage) in a clear block.\n"
-        "2) List up to 4 KEYWORD PACKS (numbered 1..N) with short labels and predicted score lift.\n"
-        "3) End with: 'Reply with 1,2,3,4 or 0 for all to apply.'\n"
-        "Constraints: Keep total output under 500 words. No fabrication; use only resume + JD evidence. ATS-safe formatting."
+def send(parts: List[Any]) -> str:
+    resp = st.session_state.chat.send_message(parts)
+    return extract_text_from_response(resp) or ""
+
+def autotailor_resume_only(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
+    cmd = (
+        "AutoTailorNow:\n"
+        "- Use the provided RESUME + JD only.\n"
+        "- Do NOT fabricate employers, titles, tools, or metrics.\n"
+        "- Convert implied matches into exact JD phrasing only when evidence exists.\n"
+        "- Reorder bullets so JD-critical items appear first; compress low-relevance content.\n"
+        "- Keep ATS-safe plain text, single column; insert <METRIC_TBD> where numbers are missing.\n"
+        "- Output ONLY the tailored resume (plain text). Do not include explanations.\n"
+        "- End with exactly: [END_RESUME]"
     )
-    parts = [types.Part.from_text(text=command)]
+    parts = [types.Part.from_text(text=cmd)]
     if st.session_state.get("resume_text"):
         parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
     if st.session_state.get("resume_meta"):
@@ -241,27 +251,234 @@ def process_with_current_resume_and_jd(jd_meta: Optional[Dict[str, Any]] = None,
         parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
     if jd_meta and jd_meta.get("file"):
         parts.append(jd_meta["file"])
+    return send(parts)
 
+def poststep_scores_and_proofs(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
+    cmd = (
+        "PostStep:\n"
+        "- Compute PRE-SCORE (overall + subscores) and POST-SCORE (overall + subscores); show Δ.\n"
+        "- Evidence Map (mini): 4–6 lines mapping {JD anchor → matching resume bullet fragment}. Use short quotes only.\n"
+        "- Change Log (max 6 bullets): before→after with a one-clause 'why' tied to the JD.\n"
+        "- At the end, print on separate lines:\n"
+        "NEW MATCH %: <overall-post>\n"
+        "NEXT OPTIONS: [1] Improve further (3 targeted packs), [2] Minor boosters, [3] Coverage Board, [4] Narrative presets, [5] A/B Bullet, [6] Level calibrator, [7] Export .txt, [0] Next JD"
+    )
+    parts = [types.Part.from_text(text=cmd)]
+    if st.session_state.get("resume_text"):
+        parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts.append(jd_meta["file"])
+    return send(parts)
+
+def suggest_three_packs(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
+    cmd = (
+        "SuggestRefinementPacks (after AutoTailor):\n"
+        "- Propose exactly 3 narrowly scoped packs (2–5 tokens/phrases each).\n"
+        "- Each pack must be fully evidenced by the tailored resume and JD; exclude anything without proof.\n"
+        "- For each pack, include: short label, tokens/phrases, JD anchor (short quote), resume anchor (short quote), predicted lift (+2–6%).\n"
+        "- Keep under 180 words total.\n"
+        "- End with: Reply with 1,2 or 0 to apply all."
+    )
+    parts = [types.Part.from_text(text=cmd)]
+    if st.session_state.get("resume_text"):
+        parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts.append(jd_meta["file"])
+    return send(parts)
+
+def apply_selected_packs(selection: str, jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
+    # Step A: updated resume only
+    cmd_a = (
+        "ApplySuggestions with the selected refinement packs: '" + selection + "'. "
+        "Output ONLY the updated ATS-safe resume (plain text) and end with: [END_RESUME]"
+    )
+    parts_a = [types.Part.from_text(text=cmd_a)]
+    if st.session_state.get("resume_text"):
+        parts_a.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts_a.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts_a.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts_a.append(jd_meta["file"])
+    resp_a = send(parts_a)
+    return resp_a
+
+def post_after_apply(jd_meta: Optional[Dict[str, Any]], jd_text: str, micropacks: bool = True) -> str:
+    tail = "more micro-packs" if micropacks else "further refinement"
+    cmd_b = (
+        "Now output only: POST-SCORE (overall 0–100) and Δ vs previous; a very short Change Log (max 4 bullets). "
+        "At the end print:\n"
+        "NEW MATCH %: <overall>\n"
+        f"NEXT OPTIONS: [1] Improve further (3 targeted packs), [2] Minor boosters, [3] Coverage Board, [4] Narrative presets, [5] A/B Bullet, [6] Level calibrator, [7] Export .txt, [0] Next JD"
+    )
+    parts_b = [types.Part.from_text(text=cmd_b)]
+    if st.session_state.get("resume_text"):
+        parts_b.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts_b.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts_b.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts_b.append(jd_meta["file"])
+    return send(parts_b)
+
+def minor_boosters(jd_meta: Optional[Dict[str, Any]], jd_text: str, user_brief: str) -> str:
+    extra = f" Also incorporate the user's brief (only if evidenced): '''{user_brief}'''." if user_brief.strip() else ""
+    cmd = (
+        "BoostScore(): Suggest 3–6 minor booster edits to the tailored resume above without proposing new keywords. "
+        "Focus on phrasing, ordering, and quantification (<METRIC_TBD>), alignment tweaks." + extra +
+        " End with exactly three micro-questions asking for missing metric values."
+    )
+    parts = [types.Part.from_text(text=cmd)]
+    if st.session_state.get("resume_text"):
+        parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts.append(jd_meta["file"])
+    return send(parts)
+
+def coverage_board(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
+    cmd = (
+        "Coverage Board:\n"
+        "- Group into Must-Have (role-critical), Nice-to-Have (differentiators), and Avoid/Exposure (no evidence).\n"
+        "- For each item: JD anchor (short quote), resume anchor (short quote), placement (Summary/Skills/Role bullet), risk flag, predicted lift (+%).\n"
+        "- Keep total under 220 words."
+    )
+    parts = [types.Part.from_text(text=cmd)]
+    if st.session_state.get("resume_text"):
+        parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts.append(jd_meta["file"])
+    return send(parts)
+
+def narrative_presets(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
+    cmd = (
+        "NarrativePresetGuide:\n"
+        "- Present 3–4 presets (Impact-First / Research-Forward / Systems & Accessibility / Product Partnering).\n"
+        "- For each: 1–2 tone rules and a single sample bullet rewrite drawn from the tailored resume.\n"
+        "- No new tools/titles; keep ATS-safe. Max 180 words."
+    )
+    parts = [types.Part.from_text(text=cmd)]
+    if st.session_state.get("resume_text"):
+        parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts.append(jd_meta["file"])
+    return send(parts)
+
+def ab_bullet_variants(jd_meta: Optional[Dict[str, Any]], jd_text: str, bullet_text: str) -> str:
+    cmd = (
+        "ABullet:\n"
+        f"- Rewrite this single bullet in three variants (A/B/C), each in a different preset (Impact-First, Research-Forward, Systems/Accessibility): '''{bullet_text}'''.\n"
+        "- Keep facts/tools/titles as-is; ATS-safe; no fabrication. Return clearly labeled A, B, C."
+    )
+    parts = [types.Part.from_text(text=cmd)]
+    if st.session_state.get("resume_text"):
+        parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts.append(jd_meta["file"])
+    return send(parts)
+
+def apply_ab_choice(jd_meta: Optional[Dict[str, Any]], jd_text: str, chosen_text: str) -> str:
+    cmd_a = (
+        "Integrate the chosen rewritten bullet into the tailored resume above, replacing the most relevant original bullet only. "
+        "Keep everything ATS-safe; do not fabricate. Output ONLY the updated resume and end with: [END_RESUME]\n"
+        f"Chosen bullet: '''{chosen_text}'''"
+    )
+    parts_a = [types.Part.from_text(text=cmd_a)]
+    if st.session_state.get("resume_text"):
+        parts_a.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts_a.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts_a.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts_a.append(jd_meta["file"])
+    return send(parts_a)
+
+def level_calibrator_prompt(jd_meta: Optional[Dict[str, Any]], jd_text: str, level: str) -> str:
+    level = level.lower().strip()
+    cmd_a = (
+        "LevelCalibrator:\n"
+        f"- Reframe scope language for a {level} lens (ownership verbs, impact scale, collaboration framing) without adding new facts.\n"
+        "- Keep ATS-safe and evidence-aligned. Output ONLY the updated resume; end with: [END_RESUME]"
+    )
+    parts_a = [types.Part.from_text(text=cmd_a)]
+    if st.session_state.get("resume_text"):
+        parts_a.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
+    if st.session_state.get("resume_meta"):
+        parts_a.append(st.session_state["resume_meta"]["file"])
+    if jd_text.strip():
+        parts_a.append(types.Part.from_text(text="[JD TEXT]\n" + jd_text.strip()))
+    if jd_meta and jd_meta.get("file"):
+        parts_a.append(jd_meta["file"])
+    return send(parts_a)
+
+# ---------------------------
+# AutoTailor kickoff
+# ---------------------------
+def run_autotailor_flow(jd_meta: Optional[Dict[str, Any]], jd_text: str):
     with st.chat_message("user", avatar="👤"):
-        st.markdown("JD provided — starting QuickScore and suggestions…")
-    st.session_state.chat_history.append({"role": "user", "parts": "JD provided — starting QuickScore and suggestions…"})
+        st.markdown("JD provided — AutoTailor in progress…")
 
-    try:
-        with st.chat_message("assistant", avatar=":material/robot_2:"):
-            with st.spinner("Scoring resume ↔ JD and preparing keyword packs…"):
-                response = st.session_state.chat.send_message(parts)
-            full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching to gemini-2.5-pro]"
-            if too_similar(st.session_state.last_assistant_text, full_response):
-                full_response = "I've already proposed packs above. Reply with numbers (e.g., 1,3) or 0 to apply all."
-            st.markdown(full_response)
-        st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-        st.session_state.last_assistant_text = full_response
-        st.session_state["awaiting_pack_selection"] = True
-        st.session_state["awaiting_micro_pack_selection"] = False
-        st.session_state["awaiting_next_options"] = False
-        st.session_state["show_next_jd_panel"] = False
-    except Exception as e:
-        st.error(f"❌ Gemini error: {e}")
+    # Step A — resume only (with auto-continue)
+    with st.chat_message("assistant", avatar=":material/robot_2:"):
+        with st.spinner("Tailoring resume to JD…"):
+            resume_part = autotailor_resume_only(jd_meta, jd_text)
+        # auto-continue up to 3 times
+        combined = resume_part
+        attempts = 0
+        while not ends_with_end_resume(combined) and attempts < 3:
+            attempts += 1
+            cont = send([
+                types.Part.from_text(text="Continue the tailored resume exactly where it stopped. "
+                                           "Do not repeat previous lines. Output ONLY the remaining resume text. "
+                                           "End with: [END_RESUME]"),
+                types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state.get("resume_text","")),
+                st.session_state["resume_meta"]["file"] if st.session_state.get("resume_meta") else None,
+                types.Part.from_text(text="[JD TEXT]\n" + jd_text) if jd_text.strip() else None,
+                jd_meta["file"] if jd_meta else None
+            ])
+            if cont.strip():
+                combined = (combined.rstrip() + "\n" + cont.lstrip()).strip()
+            else:
+                break
+        combined = trim_after_end_resume(combined)
+        st.markdown(combined)
+
+    # Step B — scores + proofs + options
+    with st.chat_message("assistant", avatar=":material/robot_2:"):
+        with st.spinner("Scoring and preparing evidence…"):
+            rest = poststep_scores_and_proofs(jd_meta, jd_text)
+        st.markdown(rest)
+
+    st.session_state["last_apply_output"] = (combined.rstrip() + "\n\n" + rest.lstrip()).strip()
+    st.session_state["awaiting_next_options"] = True
+    st.session_state["show_next_jd_panel"] = True
+    st.session_state.chat_history.append({"role": "assistant", "parts": st.session_state["last_apply_output"]})
 
 # ---------------------------
 # Main Inputs (center)
@@ -296,8 +513,6 @@ with resume_container:
         if st.button("Replace Resume"):
             st.session_state["resume_meta"] = None
             st.session_state["resume_text"] = ""
-            st.session_state["awaiting_pack_selection"] = False
-            st.session_state["awaiting_micro_pack_selection"] = False
             st.session_state["awaiting_next_options"] = False
             st.session_state["show_next_jd_panel"] = False
             st.session_state["last_apply_output"] = ""
@@ -306,7 +521,7 @@ with resume_container:
 jd_container = st.container()
 with jd_container:
     if st.session_state["resume_meta"] or st.session_state["resume_text"].strip():
-        st.info("**Step 2 — Provide a Job Description (JD)**. Each time you add a JD, I will tailor your resume.")
+        st.info("**Step 2 — Provide a Job Description (JD)**. On upload, I’ll AutoTailor your resume.")
         col1, col2 = st.columns(2)
         with col1:
             jd_up = st.file_uploader("Upload JD (PDF/TXT/DOCX)", ["pdf", "txt", "docx"], False, key="jd_uploader_center")
@@ -314,7 +529,6 @@ with jd_container:
             st.session_state["jd_text_temp"] = st.text_area("Or paste JD text", value=st.session_state["jd_text_temp"], height=140)
             jd_paste_click = st.button("Use This JD")
 
-        # JD file upload
         if jd_up is not None:
             try:
                 mime = jd_up.type or (mimetypes.guess_type(jd_up.name)[0] or "application/octet-stream")
@@ -323,14 +537,13 @@ with jd_container:
                 ensure_active_files(client, [jd_meta])
                 st.session_state["last_jd_meta"] = jd_meta
                 st.toast(f"JD received: {jd_up.name}")
-                process_with_current_resume_and_jd(jd_meta=jd_meta, jd_text="")
+                run_autotailor_flow(jd_meta, "")
             except Exception as e:
                 st.error(f"Upload failed for {jd_up.name}: {e}")
 
-        # JD pasted
         if jd_paste_click and st.session_state["jd_text_temp"].strip():
             st.session_state["last_jd_meta"] = None
-            process_with_current_resume_and_jd(jd_meta=None, jd_text=st.session_state["jd_text_temp"])
+            run_autotailor_flow(None, st.session_state["jd_text_temp"])
 
 # ---------------------------
 # Render prior messages
@@ -341,7 +554,7 @@ for msg in st.session_state.chat_history:
         st.markdown(msg["parts"])
 
 # ---------------------------
-# Bottom “Next JD” panel (appears after NEXT OPTIONS)
+# Bottom “Next JD” panel (shows after NEXT OPTIONS)
 # ---------------------------
 if st.session_state.get("awaiting_next_options") or st.session_state.get("show_next_jd_panel"):
     st.markdown("---")
@@ -362,21 +575,24 @@ if st.session_state.get("awaiting_next_options") or st.session_state.get("show_n
             st.session_state["last_jd_meta"] = jd_meta2
             st.session_state["jd_text_temp"] = ""
             st.toast(f"JD received: {next_jd_up.name}")
-            process_with_current_resume_and_jd(jd_meta=jd_meta2, jd_text="")
+            run_autotailor_flow(jd_meta2, "")
         except Exception as e:
             st.error(f"Upload failed for {next_jd_up.name}: {e}")
 
     if next_jd_btn and next_jd_text.strip():
         st.session_state["last_jd_meta"] = None
         st.session_state["jd_text_temp"] = next_jd_text
-        process_with_current_resume_and_jd(jd_meta=None, jd_text=next_jd_text)
+        run_autotailor_flow(None, next_jd_text)
 
 # ---------------------------
-# Chat input — packs → apply → next options (inc. micro-packs + 0=next JD)
+# NEXT OPTIONS — chat input
 # ---------------------------
-user_prompt = st.chat_input(
-    "Reply with packs (e.g., 1,3 or 0 for all). After apply: 1=micro-packs, 0=next JD, 2=boosters, 3=export."
-)
+placeholder = ("After AutoTailor, choose: "
+               "[1] Improve (3 packs) • [2] Minor boosters • [3] Coverage Board • [4] Narrative presets • "
+               "[5] A/B Bullet • [6] Level calibrator • [7] Export • [0] Next JD.\n"
+               "If [1], reply with packs later as '1,2' or '0'. If [5], I’ll ask for a bullet text.")
+user_prompt = st.chat_input(placeholder)
+
 if user_prompt:
     st.session_state.chat_history.append({"role": "user", "parts": user_prompt})
     with st.chat_message("user", avatar="👤"):
@@ -385,256 +601,177 @@ if user_prompt:
     need_resume = not (st.session_state.get("resume_meta") or st.session_state.get("resume_text"))
     if need_resume:
         with st.chat_message("assistant", avatar=":material/robot_2:"):
-            st.markdown("Please upload your **Master Resume** first above. Then add a JD; I’ll score and propose packs.")
+            st.markdown("Please upload your **Master Resume** first above.")
         st.stop()
 
-    pack_match = re.fullmatch(r"\s*0\s*|\s*(\d+\s*(,\s*\d+\s*)*)\s*", user_prompt)
-    option_match = re.fullmatch(r"\s*[0123]\s*", user_prompt)
+    # --- Branch: if awaiting sub-steps for tools ---
+    # A/B bullet: collecting bullet text
+    if st.session_state.get("awaiting_ab_bullet"):
+        bullet = user_prompt.strip()
+        with st.chat_message("assistant", avatar=":material/robot_2:"):
+            with st.spinner("Creating A/B/C variants…"):
+                out = ab_bullet_variants(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""), bullet)
+            st.markdown(out)
+            st.markdown("_Reply with **A**, **B**, or **C** to apply your chosen variant._")
+        st.session_state["awaiting_ab_bullet"] = False
+        st.session_state["awaiting_ab_choice"] = True
+        st.stop()
 
-    # Helper to request additional resume continuation if needed
-    def fetch_resume_continuation():
-        cont_cmd = (
-            "Continue the tailored resume exactly from where it stopped. "
-            "Do not repeat any previously printed lines. Output ONLY the remaining resume text. "
-            "End with: [END_RESUME]"
-        )
-        parts_c = [types.Part.from_text(text=cont_cmd)]
-        if st.session_state.get("resume_text"):
-            parts_c.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-        if st.session_state.get("resume_meta"):
-            parts_c.append(st.session_state["resume_meta"]["file"])
-        if st.session_state.get("jd_text_temp"):
-            parts_c.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
-        if st.session_state.get("last_jd_meta"):
-            parts_c.append(st.session_state["last_jd_meta"]["file"])
-        resp_c = st.session_state.chat.send_message(parts_c)
-        return extract_text_from_response(resp_c) or ""
+    # A/B bullet: applying choice
+    if st.session_state.get("awaiting_ab_choice"):
+        choice = user_prompt.strip().upper()
+        if choice not in ("A", "B", "C"):
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                st.markdown("Please reply with **A**, **B**, or **C**.")
+            st.stop()
+        # Ask the model to locate the chosen text from prior message context; many SDKs keep stateful chat.
+        with st.chat_message("assistant", avatar=":material/robot_2:"):
+            with st.spinner(f"Applying variant {choice} and updating resume…"):
+                updated = apply_ab_choice(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""), f"Choice {choice}")
+            st.markdown(updated)
+            with st.spinner("Re-scoring and summarizing changes…"):
+                post = post_after_apply(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""), micropacks=False)
+            st.markdown(post)
+        st.session_state["last_apply_output"] = (updated.rstrip() + "\n\n" + post.lstrip()).strip()
+        st.session_state["awaiting_ab_choice"] = False
+        st.session_state["awaiting_next_options"] = True
+        st.session_state["show_next_jd_panel"] = True
+        st.stop()
+
+    # Level calibrator: awaiting level text
+    if st.session_state.get("awaiting_level_choice"):
+        level = user_prompt.strip().lower()
+        if level not in ("junior", "mid", "senior"):
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                st.markdown("Please reply with **junior**, **mid**, or **senior**.")
+            st.stop()
+        with st.chat_message("assistant", avatar=":material/robot_2:"):
+            with st.spinner(f"Reframing to {level} lens…"):
+                updated = level_calibrator_prompt(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""), level)
+            st.markdown(updated)
+            with st.spinner("Re-scoring and summarizing changes…"):
+                post = post_after_apply(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""), micropacks=False)
+            st.markdown(post)
+        st.session_state["last_apply_output"] = (updated.rstrip() + "\n\n" + post.lstrip()).strip()
+        st.session_state["awaiting_level_choice"] = False
+        st.session_state["awaiting_next_options"] = True
+        st.session_state["show_next_jd_panel"] = True
+        st.stop()
+
+    # Pack selection (after option [1])
+    pack_match = re.fullmatch(r"\s*0\s*|\s*(\d+\s*(,\s*\d+\s*)*)\s*", user_prompt)
+    if st.session_state.get("awaiting_refine_pack_selection") and pack_match:
+        selection = user_prompt.strip()
+        with st.chat_message("assistant", avatar=":material/robot_2:"):
+            with st.spinner("Applying selected packs — updating resume…"):
+                resume_only = apply_selected_packs(selection, st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""))
+            # Auto-continue ensure full resume
+            combined = resume_only
+            tries = 0
+            while not ends_with_end_resume(combined) and tries < 3:
+                tries += 1
+                cont = send([
+                    types.Part.from_text(text="Continue the tailored resume exactly where it stopped. "
+                                               "Do not repeat previous lines. Output ONLY the remaining resume text. "
+                                               "End with: [END_RESUME]"),
+                    types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state.get("resume_text","")),
+                    st.session_state["resume_meta"]["file"] if st.session_state.get("resume_meta") else None,
+                    types.Part.from_text(text="[JD TEXT]\n" + st.session_state.get("jd_text_temp","")) if st.session_state.get("jd_text_temp","").strip() else None,
+                    st.session_state["last_jd_meta"]["file"] if st.session_state.get("last_jd_meta") else None
+                ])
+                if cont.strip():
+                    combined = (combined.rstrip() + "\n" + cont.lstrip()).strip()
+                else:
+                    break
+            combined = trim_after_end_resume(combined)
+            st.markdown(combined)
+
+            with st.spinner("Re-scoring and summarizing changes…"):
+                rest = post_after_apply(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""))
+            st.markdown(rest)
+        st.session_state["last_apply_output"] = (combined.rstrip() + "\n\n" + rest.lstrip()).strip()
+        st.session_state["awaiting_refine_pack_selection"] = False
+        st.session_state["awaiting_next_options"] = True
+        st.session_state["show_next_jd_panel"] = True
+        st.stop()
+
+    # Otherwise, treat input as an option
+    opt = user_prompt.strip().lower()
 
     try:
-        # A) APPLY PACKS (initial packs) — TWO-STEP + AUTO-CONTINUE
-        if st.session_state.get("awaiting_pack_selection") and pack_match:
-            selection = user_prompt.strip()
-
-            # --- STEP A: Apply + Tailored Resume ONLY ---
-            apply_cmd_a = (
-                "ApplySuggestions with the selected packs: '" + selection + "'. "
-                "Output ONLY the Tailored ATS-safe resume (plain text). "
-                "Do NOT include Post-Score, percentages, cover letter, change log, or extra commentary. "
-                "End with a line exactly: [END_RESUME]"
-            )
-            parts_a = [types.Part.from_text(text=apply_cmd_a)]
-            if st.session_state.get("resume_text"):
-                parts_a.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-            if st.session_state.get("resume_meta"):
-                parts_a.append(st.session_state["resume_meta"]["file"])
-            if st.session_state.get("jd_text_temp"):
-                parts_a.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
-            if st.session_state.get("last_jd_meta"):
-                parts_a.append(st.session_state["last_jd_meta"]["file"])
-
+        if opt in ("1", "improve", "packs"):
             with st.chat_message("assistant", avatar=":material/robot_2:"):
-                with st.spinner("Applying packs — generating tailored resume…"):
-                    resp_a = st.session_state.chat.send_message(parts_a)
-                resume_only = extract_text_from_response(resp_a) or "[Resume content missing]"
+                with st.spinner("Preparing three targeted, evidence-backed packs…"):
+                    out = suggest_three_packs(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""))
+                st.markdown(out)
+                st.markdown("_Reply with **1,2** or **0** to apply all._")
+            st.session_state["awaiting_refine_pack_selection"] = True
+            st.session_state["awaiting_next_options"] = False
 
-                # Auto-continue up to 3 times until [END_RESUME]
-                attempts = 0
-                combined = resume_only
-                while not ends_with_end_resume(combined) and attempts < 3:
-                    attempts += 1
-                    more = fetch_resume_continuation()
-                    if not more.strip():
-                        break
-                    combined = (combined.rstrip() + "\n" + more.lstrip()).strip()
-
-                combined = trim_after_end_resume(combined)
-                st.markdown(combined)
-
-            # --- STEP B: Post-Score + Cover Letter + Change Log + Options ---
-            apply_cmd_b = (
-                "Now output the remaining items for the same tailoring you just performed: "
-                "2) POST-SCORE (overall 0–100) and Δ vs PRE-SCORE. "
-                "3) Concise evidence-based cover letter (180–250 words). "
-                "4) Short Change Log (before→after bullets). "
-                "At the very end, print on separate lines: NEW MATCH %: <overall>\n"
-                "NEXT OPTIONS: [1] Refine with targeted micro-packs, [0] Next JD, [2] Minor boosters, [3] Export .txt. "
-                "Do NOT repeat the resume and do NOT propose new keyword packs."
-            )
-            parts_b = [types.Part.from_text(text=apply_cmd_b)]
-            if st.session_state.get("resume_text"):
-                parts_b.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-            if st.session_state.get("resume_meta"):
-                parts_b.append(st.session_state["resume_meta"]["file"])
-            if st.session_state.get("jd_text_temp"):
-                parts_b.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
-            if st.session_state.get("last_jd_meta"):
-                parts_b.append(st.session_state["last_jd_meta"]["file"])
-
+        elif opt in ("2", "booster", "boosters"):
+            # Optional user brief UI above chat; also read here if they typed inline
+            st.session_state["custom_refine_text"] = st.session_state.get("custom_refine_text","")
             with st.chat_message("assistant", avatar=":material/robot_2:"):
-                with st.spinner("Finishing — Post-Score, cover letter, and change log…"):
-                    resp_b = st.session_state.chat.send_message(parts_b)
-                rest = extract_text_from_response(resp_b) or "[Details missing]"
-                st.markdown(rest)
-
-            st.session_state["last_apply_output"] = (combined.rstrip() + "\n\n" + rest.lstrip()).strip()
-            st.session_state["awaiting_pack_selection"] = False
-            st.session_state["awaiting_micro_pack_selection"] = False
+                with st.spinner("Suggesting minor boosters…"):
+                    out = minor_boosters(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""), st.session_state["custom_refine_text"])
+                st.markdown(out)
             st.session_state["awaiting_next_options"] = True
             st.session_state["show_next_jd_panel"] = True
-            st.session_state["last_assistant_text"] = st.session_state["last_apply_output"]
-            st.session_state.chat_history.append({"role": "assistant", "parts": st.session_state["last_apply_output"]})
 
-        # B) NEXT OPTIONS (after apply): 1=micropacks, 0=next JD, 2=boosters, 3=export
-        elif st.session_state.get("awaiting_next_options") and option_match:
-            choice = option_match.group(0).strip()
-            if choice == "1":
-                micro_cmd = (
-                    "SuggestPacks(): Propose 1–3 narrowly scoped MICRO PACKS with exact phrasing from the JD that are safely supported by the resume evidence. "
-                    "Each pack must include 2–5 precise tokens/phrases and a small predicted score lift (+2–6%). "
-                    "Be cautious: exclude anything not evidenced. Avoid repeating earlier packs. "
-                    "End with: 'Reply with 1,2 or 0 to apply all micro-packs.'"
-                )
-                parts = [types.Part.from_text(text=micro_cmd)]
-                if st.session_state.get("resume_text"):
-                    parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-                if st.session_state.get("resume_meta"):
-                    parts.append(st.session_state["resume_meta"]["file"])
-                if st.session_state.get("jd_text_temp"):
-                    parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
-                if st.session_state.get("last_jd_meta"):
-                    parts.append(st.session_state["last_jd_meta"]["file"])
-                with st.chat_message("assistant", avatar=":material/robot_2:"):
-                    with st.spinner("Gathering micro-packs…"):
-                        response = st.session_state.chat.send_message(parts)
-                    full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching models]"
-                    st.markdown(full_response)
-                st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-                st.session_state.last_assistant_text = full_response
-                st.session_state["awaiting_next_options"] = False
-                st.session_state["awaiting_micro_pack_selection"] = True
-                st.session_state["show_next_jd_panel"] = False
-
-            elif choice == "0":
-                with st.chat_message("assistant", avatar=":material/robot_2:"):
-                    st.markdown("Upload/paste the **next JD** — I’ll reuse your master resume on file.")
-                st.session_state.chat_history.append({"role": "assistant", "parts": "Proceed with next JD."})
-                st.session_state.last_assistant_text = "Proceed with next JD."
-                st.session_state["awaiting_next_options"] = True
-                st.session_state["awaiting_micro_pack_selection"] = False
-                st.session_state["jd_text_temp"] = ""
-                st.session_state["last_jd_meta"] = None
-                st.session_state["show_next_jd_panel"] = True
-                st.rerun()
-
-            elif choice == "2":
-                boost_cmd = (
-                    "BoostScore(): Suggest 3–6 minor booster edits to the tailored resume above without proposing new keyword packs. "
-                    "Focus on phrasing, ordering, quantification (<METRIC_TBD>), and alignment tweaks. "
-                    "End with exactly three micro-questions asking for missing metric values."
-                )
-                parts = [types.Part.from_text(text=boost_cmd)]
-                if st.session_state.get("resume_text"):
-                    parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-                if st.session_state.get("resume_meta"):
-                    parts.append(st.session_state["resume_meta"]["file"])
-                if st.session_state.get("jd_text_temp"):
-                    parts.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
-                if st.session_state.get("last_jd_meta"):
-                    parts.append(st.session_state["last_jd_meta"]["file"])
-                with st.chat_message("assistant", avatar=":material/robot_2:"):
-                    with st.spinner("Preparing targeted boosters…"):
-                        response = st.session_state.chat.send_message(parts)
-                    full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching models]"
-                    st.markdown(full_response)
-                st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-                st.session_state.last_assistant_text = full_response
-                st.session_state["awaiting_next_options"] = True
-                st.session_state["show_next_jd_panel"] = True
-
-            elif choice == "3":
-                with st.chat_message("assistant", avatar=":material/robot_2:"):
-                    if st.session_state.get("last_apply_output"):
-                        st.download_button(
-                            "Download tailored resume + cover letter (.txt)",
-                            data=st.session_state["last_apply_output"].encode("utf-8"),
-                            file_name="readysetrole_results.txt",
-                            mime="text/plain",
-                            use_container_width=True,
-                        )
-                    else:
-                        st.markdown("No recent outputs to export. Apply packs first.")
-                st.session_state.chat_history.append({"role": "assistant", "parts": "Export option shown."})
-                st.session_state.last_assistant_text = "Export option shown."
-                st.session_state["awaiting_next_options"] = True
-                st.session_state["show_next_jd_panel"] = True
-
-        # C) APPLY MICRO-PACKS (numbers or 0 to apply all) after option 1 — with resume continuation too
-        elif st.session_state.get("awaiting_micro_pack_selection") and pack_match:
-            selection = user_prompt.strip()
-
-            # STEP A for micro-packs
-            apply_cmd_a2 = (
-                "ApplySuggestions with the selected MICRO PACKS: '" + selection + "'. "
-                "Output ONLY the updated Tailored ATS-safe resume (plain text). End with: [END_RESUME]"
-            )
-            parts_a2 = [types.Part.from_text(text=apply_cmd_a2)]
-            if st.session_state.get("resume_text"):
-                parts_a2.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-            if st.session_state.get("resume_meta"):
-                parts_a2.append(st.session_state["resume_meta"]["file"])
-            if st.session_state.get("jd_text_temp"):
-                parts_a2.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
-            if st.session_state.get("last_jd_meta"):
-                parts_a2.append(st.session_state["last_jd_meta"]["file"])
-
+        elif opt in ("3", "coverage", "board"):
             with st.chat_message("assistant", avatar=":material/robot_2:"):
-                with st.spinner("Applying micro-packs — updating resume…"):
-                    resp_a2 = st.session_state.chat.send_message(parts_a2)
-                resume_only2 = extract_text_from_response(resp_a2) or "[Resume content missing]"
-
-                attempts = 0
-                combined2 = resume_only2
-                while not ends_with_end_resume(combined2) and attempts < 3:
-                    attempts += 1
-                    more2 = fetch_resume_continuation()
-                    if not more2.strip():
-                        break
-                    combined2 = (combined2.rstrip() + "\n" + more2.lstrip()).strip()
-
-                combined2 = trim_after_end_resume(combined2)
-                st.markdown(combined2)
-
-            # STEP B for micro-packs
-            apply_cmd_b2 = (
-                "Now output only: POST-SCORE (overall 0–100) and Δ vs previous, plus a very short Change Log (3 bullets max). "
-                "At the end print: NEW MATCH %: <overall>\n"
-                "NEXT OPTIONS: [1] Refine with more micro-packs, [0] Next JD, [2] Minor boosters, [3] Export .txt."
-            )
-            parts_b2 = [types.Part.from_text(text=apply_cmd_b2)]
-            if st.session_state.get("resume_text"):
-                parts_b2.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
-            if st.session_state.get("resume_meta"):
-                parts_b2.append(st.session_state["resume_meta"]["file"])
-            if st.session_state.get("jd_text_temp"):
-                parts_b2.append(types.Part.from_text(text="[JD TEXT]\n" + st.session_state["jd_text_temp"]))
-            if st.session_state.get("last_jd_meta"):
-                parts_b2.append(st.session_state["last_jd_meta"]["file"])
-
-            with st.chat_message("assistant", avatar=":material/robot_2:"):
-                with st.spinner("Re-scoring and summarizing changes…"):
-                    resp_b2 = st.session_state.chat.send_message(parts_b2)
-                rest2 = extract_text_from_response(resp_b2) or "[Details missing]"
-                st.markdown(rest2)
-
-            st.session_state["last_apply_output"] = (combined2.rstrip() + "\n\n" + rest2.lstrip()).strip()
-            st.session_state["awaiting_micro_pack_selection"] = False
+                with st.spinner("Building Coverage Board…"):
+                    out = coverage_board(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""))
+                st.markdown(out)
             st.session_state["awaiting_next_options"] = True
             st.session_state["show_next_jd_panel"] = True
-            st.session_state["last_assistant_text"] = st.session_state["last_apply_output"]
-            st.session_state.chat_history.append({"role": "assistant", "parts": st.session_state["last_apply_output"]})
 
-        # D) General follow-up
+        elif opt in ("4", "narrative", "presets"):
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                with st.spinner("Showing narrative presets…"):
+                    out = narrative_presets(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""))
+                st.markdown(out)
+            st.session_state["awaiting_next_options"] = True
+            st.session_state["show_next_jd_panel"] = True
+
+        elif opt in ("5", "ab", "a/b", "bullet"):
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                st.markdown("Paste the **single bullet** you want rewritten (A/B/C).")
+            st.session_state["awaiting_ab_bullet"] = True
+            st.session_state["awaiting_next_options"] = False
+
+        elif opt in ("6", "level", "calibrator"):
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                st.markdown("Reply with **junior**, **mid**, or **senior** to reframe scope safely.")
+            st.session_state["awaiting_level_choice"] = True
+            st.session_state["awaiting_next_options"] = False
+
+        elif opt in ("7", "export", "txt", "download"):
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                if st.session_state.get("last_apply_output"):
+                    st.download_button(
+                        "Download tailored resume + evidence (.txt)",
+                        data=st.session_state["last_apply_output"].encode("utf-8"),
+                        file_name="readysetrole_results.txt",
+                        mime="text/plain",
+                        use_container_width=True,
+                    )
+                else:
+                    st.markdown("No recent outputs to export. Run AutoTailor first.")
+            st.session_state["awaiting_next_options"] = True
+            st.session_state["show_next_jd_panel"] = True
+
+        elif opt in ("0", "next", "next jd"):
+            with st.chat_message("assistant", avatar=":material/robot_2:"):
+                st.markdown("Upload/paste the **next JD** — I’ll reuse your master resume on file.")
+            st.session_state["jd_text_temp"] = ""
+            st.session_state["last_jd_meta"] = None
+            st.session_state["awaiting_next_options"] = True
+            st.session_state["show_next_jd_panel"] = True
+            st.rerun()
+
         else:
+            # General fall-through to the model (rare)
             parts = [types.Part.from_text(text=user_prompt)]
             if st.session_state.get("resume_text"):
                 parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
@@ -646,13 +783,20 @@ if user_prompt:
                 parts.append(st.session_state["last_jd_meta"]["file"])
             with st.chat_message("assistant", avatar=":material/robot_2:"):
                 with st.spinner("Thinking…"):
-                    response = st.session_state.chat.send_message(parts)
-                full_response = extract_text_from_response(response) or "[No content returned — try increasing max_output_tokens or switching models]"
-                if too_similar(st.session_state.last_assistant_text, full_response):
-                    full_response = "I've covered that above. Choose: 1=micro-packs, 0=next JD, 2=boosters, 3=export."
-                st.markdown(full_response)
-            st.session_state.chat_history.append({"role": "assistant", "parts": full_response})
-            st.session_state.last_assistant_text = full_response
+                    out = send(parts)
+                out = out or "I’m ready. Choose an option: 1/2/3/4/5/6/7 or 0 for the next JD."
+                st.markdown(out)
+            st.session_state["awaiting_next_options"] = True
 
     except Exception as e:
         st.error(f"❌ Gemini error: {e}")
+
+# ------------- Optional: small refine brief UI when at options -------------
+if st.session_state.get("awaiting_next_options"):
+    st.markdown("---")
+    st.markdown("**Optional: add a custom refine brief** (used by option [2] Minor boosters)")
+    st.session_state["custom_refine_text"] = st.text_area(
+        "e.g., tighten summary to 45 words, surface 'Figma' in Skills, quantify Mayo with users impacted",
+        value=st.session_state.get("custom_refine_text",""),
+        height=90
+    )
