@@ -64,18 +64,23 @@ Rules:
 
 
 def parse_xmlish_instr(txt: str) -> str:
-    """Extract <Role>, <Goal>, <Rules>, <Knowledge>, <SpecializedActions>, <Guidelines> into one system string."""
+    """Extracts <Role>, <Goal>, <Rules>, <Knowledge>, <SpecializedActions>, <Guidelines> into one system string.
+    Uses str.format to avoid f-string newline issues on some deployments.
+    """
     import re as _re
     sections = ["Role", "Goal", "Rules", "Knowledge", "SpecializedActions", "Guidelines"]
     chunks = []
     for tag in sections:
         m = _re.search(fr"<{tag}>(.*?)</{tag}>", txt, flags=_re.DOTALL | _re.IGNORECASE)
         if m:
-            chunks.append(f"{tag}:
-{m.group(1).strip()}
+            chunks.append("{}:
+{}
 
-")
-    return "".join(chunks).strip() or load_default_identity()
+".format(tag, m.group(1).strip()))
+    out = "".join(chunks).strip()
+    return out if out else load_default_identity()
+
+
 
 
 def ensure_active_files(client: genai.Client, files_meta: List[Dict[str, Any]], max_wait_s: float = 12.0):
