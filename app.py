@@ -65,20 +65,23 @@ Rules:
 
 def parse_xmlish_instr(txt: str) -> str:
     """Extracts <Role>, <Goal>, <Rules>, <Knowledge>, <SpecializedActions>, <Guidelines> into one system string.
-    Uses str.format to avoid f-string newline issues on some deployments.
+    Avoids f-strings entirely to prevent 'unterminated f-string' parser issues.
     """
     import re as _re
     sections = ["Role", "Goal", "Rules", "Knowledge", "SpecializedActions", "Guidelines"]
     chunks = []
     for tag in sections:
-        m = _re.search(fr"<{tag}>(.*?)</{tag}>", txt, flags=_re.DOTALL | _re.IGNORECASE)
+        pattern = "<" + tag + ">(.*?)</" + tag + ">"
+        m = _re.search(pattern, txt, flags=_re.DOTALL | _re.IGNORECASE)
         if m:
-            chunks.append("{}:
-{}
+            chunks.append(tag + ":
+" + m.group(1).strip() + "
 
-".format(tag, m.group(1).strip()))
+")
     out = "".join(chunks).strip()
     return out if out else load_default_identity()
+
+
 
 
 
