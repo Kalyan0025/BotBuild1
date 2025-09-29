@@ -295,7 +295,6 @@ def suggest_three_packs(jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
     return send(parts)
 
 def apply_selected_packs(selection: str, jd_meta: Optional[Dict[str, Any]], jd_text: str) -> str:
-    # Step A: updated resume only
     cmd_a = (
         "ApplySuggestions with the selected refinement packs: '" + selection + "'. "
         "Output ONLY the updated ATS-safe resume (plain text) and end with: [END_RESUME]"
@@ -313,12 +312,11 @@ def apply_selected_packs(selection: str, jd_meta: Optional[Dict[str, Any]], jd_t
     return resp_a
 
 def post_after_apply(jd_meta: Optional[Dict[str, Any]], jd_text: str, micropacks: bool = True) -> str:
-    tail = "more micro-packs" if micropacks else "further refinement"
     cmd_b = (
         "Now output only: POST-SCORE (overall 0–100) and Δ vs previous; a very short Change Log (max 4 bullets). "
         "At the end print:\n"
         "NEW MATCH %: <overall>\n"
-        f"NEXT OPTIONS: [1] Improve further (3 targeted packs), [2] Minor boosters, [3] Coverage Board, [4] Narrative presets, [5] A/B Bullet, [6] Level calibrator, [7] Export .txt, [0] Next JD"
+        "NEXT OPTIONS: [1] Improve further (3 targeted packs), [2] Minor boosters, [3] Coverage Board, [4] Narrative presets, [5] A/B Bullet, [6] Level calibrator, [7] Export .txt, [0] Next JD"
     )
     parts_b = [types.Part.from_text(text=cmd_b)]
     if st.session_state.get("resume_text"):
@@ -604,8 +602,7 @@ if user_prompt:
             st.markdown("Please upload your **Master Resume** first above.")
         st.stop()
 
-    # --- Branch: if awaiting sub-steps for tools ---
-    # A/B bullet: collecting bullet text
+    # Sub-step waits
     if st.session_state.get("awaiting_ab_bullet"):
         bullet = user_prompt.strip()
         with st.chat_message("assistant", avatar=":material/robot_2:"):
@@ -617,14 +614,12 @@ if user_prompt:
         st.session_state["awaiting_ab_choice"] = True
         st.stop()
 
-    # A/B bullet: applying choice
     if st.session_state.get("awaiting_ab_choice"):
         choice = user_prompt.strip().upper()
         if choice not in ("A", "B", "C"):
             with st.chat_message("assistant", avatar=":material/robot_2:"):
                 st.markdown("Please reply with **A**, **B**, or **C**.")
             st.stop()
-        # Ask the model to locate the chosen text from prior message context; many SDKs keep stateful chat.
         with st.chat_message("assistant", avatar=":material/robot_2:"):
             with st.spinner(f"Applying variant {choice} and updating resume…"):
                 updated = apply_ab_choice(st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""), f"Choice {choice}")
@@ -638,7 +633,6 @@ if user_prompt:
         st.session_state["show_next_jd_panel"] = True
         st.stop()
 
-    # Level calibrator: awaiting level text
     if st.session_state.get("awaiting_level_choice"):
         level = user_prompt.strip().lower()
         if level not in ("junior", "mid", "senior"):
@@ -658,14 +652,13 @@ if user_prompt:
         st.session_state["show_next_jd_panel"] = True
         st.stop()
 
-    # Pack selection (after option [1])
+    # Pack selection after option [1]
     pack_match = re.fullmatch(r"\s*0\s*|\s*(\d+\s*(,\s*\d+\s*)*)\s*", user_prompt)
     if st.session_state.get("awaiting_refine_pack_selection") and pack_match:
         selection = user_prompt.strip()
         with st.chat_message("assistant", avatar=":material/robot_2:"):
             with st.spinner("Applying selected packs — updating resume…"):
                 resume_only = apply_selected_packs(selection, st.session_state.get("last_jd_meta"), st.session_state.get("jd_text_temp",""))
-            # Auto-continue ensure full resume
             combined = resume_only
             tries = 0
             while not ends_with_end_resume(combined) and tries < 3:
@@ -709,7 +702,6 @@ if user_prompt:
             st.session_state["awaiting_next_options"] = False
 
         elif opt in ("2", "booster", "boosters"):
-            # Optional user brief UI above chat; also read here if they typed inline
             st.session_state["custom_refine_text"] = st.session_state.get("custom_refine_text","")
             with st.chat_message("assistant", avatar=":material/robot_2:"):
                 with st.spinner("Suggesting minor boosters…"):
@@ -771,7 +763,6 @@ if user_prompt:
             st.rerun()
 
         else:
-            # General fall-through to the model (rare)
             parts = [types.Part.from_text(text=user_prompt)]
             if st.session_state.get("resume_text"):
                 parts.append(types.Part.from_text(text="[RESUME TEXT]\n" + st.session_state["resume_text"]))
