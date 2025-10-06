@@ -83,6 +83,24 @@ def extract_json(text: str):
     except Exception:
         return None
 
+def escape_tex(s: str) -> str:
+    """Escape LaTeX special characters in user-supplied header fields."""
+    if not s:
+        return ""
+    repl = {
+        '\\': r'\\textbackslash{}', '&': r'\&', '%': r'\%', '$': r'\$',
+        '#': r'\#', '_': r'\_', '{': r'\{', '}': r'\}', '~': r'\textasciitilde{}',
+        '^': r'\textasciicircum{}'
+    }
+    for k, v in repl.items():
+        s = s.replace(k, v)
+    return s
+
+def until_marker(text: str, marker: str) -> str:
+    """Keep output up to and including a marker, if present."""
+    parts = re.split(re.escape(marker), text, flags=re.IGNORECASE)
+    return (parts[0] + marker) if len(parts) > 1 else text
+
 # --- Prompts ---------------------------------------------------------------
 SCORE_PROMPT_TMPL = """Return ONLY a JSON object with the fields below (0–100 integers).
 
@@ -104,12 +122,10 @@ Return:
 }}
 """
 
-TAILOR_LATEX_PROMPT_TMPL = r"""Using the resume and JD below, output an Overleaf-ready ATS-safe LaTeX resume
-that follows EXACTLY this structure (fill fields; omit sections if empty). Do not add tables/icons/graphics.
-Use bullet style: Action → What → How/Tools → Impact. If impact metric is unknown, use <METRIC_TBD>.
-The output MUST be ONLY the LaTeX code and MUST end with [END_LATEX_RESUME].
-
-=== TEMPLATE TO FOLLOW ===
+# NOTE: We do NOT place LaTeX braces in this format string.
+#       We inject the LaTeX template as a variable so { } in LaTeX never
+#       collide with Python .format placeholders.
+LATEX_RESUME_TEMPLATE = r"""
 \documentclass[10pt]{article}
 \usepackage[margin=0.5in]{geometry}
 \usepackage[hidelinks]{hyperref}
@@ -124,42 +140,52 @@ The output MUST be ONLY the LaTeX code and MUST end with [END_LATEX_RESUME].
 
 \begin{document}
 
-{\Large \bfseries %(name)s} \\[6pt]
-%(location)s — %(phone)s — \href{mailto:%(email)s}{%(email)s} — %
-\href{%(portfolio_url)s}{%(portfolio_label)s} — %
-\href{%(linkedin_url)s}{%(linkedin_label)s}
+{\Large \bfseries [NAME]} \\[6pt]
+[LOCATION] — [PHONE] — \href{mailto:[EMAIL]}{[EMAIL]} — %
+\href{[PORTFOLIO_URL]}{[PORTFOLIO_LABEL]} — %
+\href{[LINKEDIN_URL]}{[LINKEDIN_LABEL]}
 
 \vspace{4pt}\hrule\vspace{4pt}
 
 \section*{Summary}
-%(summary)s
+[SUMMARY_CONTENT]
 
 \vspace{4pt}\hrule\vspace{4pt}
 
 \section*{Education}
-%(education)s
+[EDUCATION_CONTENT]
 
 \vspace{4pt}\hrule\vspace{4pt}
 
 \section*{Professional Experience}
-%(experience)s
+[EXPERIENCE_CONTENT]
 
 \vspace{4pt}\hrule\vspace{4pt}
 
 \section*{Selected Projects}
-%(projects)s
+[PROJECTS_CONTENT]
 
 \vspace{4pt}\hrule\vspace{4pt}
 
 \section*{Skills}
-%(skills)s
+[SKILLS_CONTENT]
 
-%(certs_block)s
+[OPTIONAL_CERTIFICATIONS_BLOCK]
 
 \end{document}
+"""
+
+TAILOR_LATEX_PROMPT_TMPL = r"""Using the resume and JD below, output an Overleaf-ready ATS-safe LaTeX resume
+that follows EXACTLY the provided template structure (fill fields; omit sections if empty). 
+Do not add tables/icons/graphics. 
+Use bullet style: Action → What → How/Tools → Impact. If impact is unknown, use <METRIC_TBD>.
+Output MUST be ONLY the LaTeX code and MUST end with [END_LATEX_RESUME].
+
+=== TEMPLATE TO FOLLOW ===
+{LATEX_RESUME_TEMPLATE}
 === END TEMPLATE ===
 
-# Header Fields (fill exactly into the placeholders):
+# Use these exact header values:
 NAME: {name}
 LOCATION: {location}
 PHONE: {phone}
@@ -169,10 +195,11 @@ PORTFOLIO_LABEL: {portfolio_label}
 LINKEDIN_URL: {linkedin_url}
 LINKEDIN_LABEL: {linkedin_label}
 
-# Build content for Summary, Education, Experience, Projects, Skills, Certifications from the resume.
-# Integrate JD keywords only where there is evidence in the resume. No fabrication. Use <METRIC_TBD> if needed.
+# Build content for Summary (35–60 words), Education, Professional Experience (3–6 bullets/role),
+# Selected Projects (2–3), Skills (12–24 grouped), Certifications (optional).
+# Integrate JD keywords ONLY where supported by resume evidence. No fabrication. Use <METRIC_TBD> if needed.
 
-RESUME:
+RESUME (source of truth):
 {resume}
 
 JOB DESCRIPTION:
@@ -181,37 +208,50 @@ JOB DESCRIPTION:
 OUTPUT ONLY THE LATEX CODE. END WITH [END_LATEX_RESUME].
 """
 
-COVER_LETTER_LATEX_PROMPT_TMPL = r"""Write a concise LaTeX cover letter (180–250 words) that CONTINUES the same resume–JD context.
-It must use this exact LaTeX format and end with [END_LATEX_COVER].
-Ground claims ONLY in the tailored resume; you may incorporate these user notes if provided.
-No fabrication.
-
-TEMPLATE:
+LATEX_LETTER_TEMPLATE = r"""
 \input{setup/preamble.tex}
 \input{setup/macros.tex}
 
 \begin{document}
-\name{{%(name)s}}{{%(sender_title)s}}
-\receiver{{%(receiver)s}}
+\name{[NAME]}{[TITLE]}
+\receiver{[RECEIVER]}
 
-\para{{Dear %(greeting)s,}}
+\para{Dear [GREETING],}
 
-\para{{[PARAGRAPH 1 — Connect resume strengths to the company/role using JD keywords that match the resume evidence.]}}
+\para{[PARAGRAPH 1 — Connect resume strengths to the company/role using JD keywords that match the resume evidence.]}
 
-\para{{[PARAGRAPH 2 — Demonstrate 2–3 relevant achievements from the tailored resume (use tools/techniques).]}}
+\para{[PARAGRAPH 2 — Demonstrate 2–3 relevant achievements from the tailored resume (use tools/techniques).]}
 
-\para{{[PARAGRAPH 3 — Motivation, cultural fit, and a confident close with availability.] }}
+\para{[PARAGRAPH 3 — Motivation, cultural fit, and a confident close with availability.]}
 
-\bottom{{%(sender_city)s}}{{%(sender_phone)s}}{{%(sender_email)s}}
+\bottom{[CITY, STATE]}{[PHONE]}{[EMAIL]}
 
 \end{document}
+"""
 
-CONTEXT (TAILORED RESUME — factual source of truth):
-{tailored_resume}
+COVER_LETTER_LATEX_PROMPT_TMPL = r"""Write a concise LaTeX cover letter (180–250 words) that CONTINUES the same resume–JD context.
+It must use the exact LaTeX format shown and end with [END_LATEX_COVER].
+Ground claims ONLY in the tailored resume (below) and optional user notes. No fabrication.
+
+=== LETTER TEMPLATE TO FOLLOW ===
+{LATEX_LETTER_TEMPLATE}
+=== END TEMPLATE ===
+
+# Fill these header fields exactly:
+NAME: {name}
+TITLE: {sender_title}
+RECEIVER: {receiver}
+GREETING: {greeting}
+CITY_STATE: {sender_city}
+PHONE: {sender_phone}
+EMAIL: {sender_email}
 
 COMPANY: {company}
 ROLE: {role}
 USER NOTES (optional): {notes}
+
+CONTEXT (TAILORED RESUME — factual source of truth):
+{tailored_resume}
 
 OUTPUT ONLY THE LATEX CODE. END WITH [END_LATEX_COVER].
 """
@@ -227,6 +267,8 @@ if 'scores' not in st.session_state:
     st.session_state.scores = {}
 if 'tailored_latex' not in st.session_state:
     st.session_state.tailored_latex = None
+if 'header' not in st.session_state:
+    st.session_state.header = {}
 
 # --- Page ------------------------------------------------------------------
 st.set_page_config(page_title="ReadysetRole — LaTeX ATS Tailor", page_icon="⚡", layout="wide")
@@ -292,31 +334,45 @@ if st.session_state.master_resume and st.session_state.current_jd:
     # --- Header fields for LaTeX resume -----------------------------------
     with st.form("latex_header_form"):
         st.subheader("👤 Header (Resume LaTeX)")
-        name = st.text_input("Name", value="Your Name")
-        location = st.text_input("Location", value="City, ST")
-        phone = st.text_input("Phone", value="(000) 000-0000")
-        email = st.text_input("Email", value="you@example.com")
-        portfolio_url = st.text_input("Portfolio URL", value="https://example.com")
-        portfolio_label = st.text_input("Portfolio Label", value="example.com")
-        linkedin_url = st.text_input("LinkedIn URL", value="https://www.linkedin.com/in/your-handle/")
-        linkedin_label = st.text_input("LinkedIn Label", value="linkedin.com/in/your-handle")
+        name = st.text_input("Name", value=st.session_state.header.get("name", ""))
+        location = st.text_input("Location", value=st.session_state.header.get("location", ""))
+        phone = st.text_input("Phone", value=st.session_state.header.get("phone", ""))
+        email = st.text_input("Email", value=st.session_state.header.get("email", ""))
+        portfolio_url = st.text_input("Portfolio URL", value=st.session_state.header.get("portfolio_url", ""))
+        portfolio_label = st.text_input("Portfolio Label", value=st.session_state.header.get("portfolio_label", ""))
+        linkedin_url = st.text_input("LinkedIn URL", value=st.session_state.header.get("linkedin_url", ""))
+        linkedin_label = st.text_input("LinkedIn Label", value=st.session_state.header.get("linkedin_label", ""))
         generate_resume = st.form_submit_button("🎯 Generate LaTeX Resume", type="primary", use_container_width=True)
 
     if generate_resume:
+        # persist header values
+        st.session_state.header.update({
+            "name": name, "location": location, "phone": phone, "email": email,
+            "portfolio_url": portfolio_url, "portfolio_label": portfolio_label,
+            "linkedin_url": linkedin_url, "linkedin_label": linkedin_label
+        })
+
+        # escape TeX
+        name_e = escape_tex(name)
+        location_e = escape_tex(location)
+        phone_e = escape_tex(phone)
+        email_e = escape_tex(email)
+        portfolio_url_e = escape_tex(portfolio_url)
+        portfolio_label_e = escape_tex(portfolio_label)
+        linkedin_url_e = escape_tex(linkedin_url)
+        linkedin_label_e = escape_tex(linkedin_label)
+
         with st.spinner("Tailoring LaTeX resume..."):
             tailor_prompt = TAILOR_LATEX_PROMPT_TMPL.format(
-                name=name,
-                location=location,
-                phone=phone,
-                email=email,
-                portfolio_url=portfolio_url,
-                portfolio_label=portfolio_label,
-                linkedin_url=linkedin_url,
-                linkedin_label=linkedin_label,
+                LATEX_RESUME_TEMPLATE=LATEX_RESUME_TEMPLATE,
+                name=name_e, location=location_e, phone=phone_e, email=email_e,
+                portfolio_url=portfolio_url_e, portfolio_label=portfolio_label_e,
+                linkedin_url=linkedin_url_e, linkedin_label=linkedin_label_e,
                 resume=st.session_state.master_resume,
                 jd=st.session_state.current_jd
             )
             latex_resume = call_gemini(tailor_prompt, temperature=0.6)
+            latex_resume = until_marker(latex_resume, "[END_LATEX_RESUME]")
             st.session_state.tailored_latex = latex_resume
 
 # --- Tailored Resume (LaTeX) -----------------------------------------------
@@ -328,34 +384,48 @@ if st.session_state.tailored_latex:
     st.subheader("✉️ Optional: LaTeX Cover Letter")
 
     with st.form("cover_form"):
-        company = st.text_input("Company", value="")
-        role = st.text_input("Role / Position", value="")
-        receiver = st.text_input("Receiver (e.g., Hiring Manager \\\\ Company)", value="Hiring Manager")
-        greeting = st.text_input("Greeting (Dear ___,)", value="Hiring Manager")
-        sender_title = st.text_input("Sender Title (under \\name{})", value="Applicant")
-        sender_city = st.text_input("Sender City", value="City, ST")
-        sender_phone = st.text_input("Sender Phone", value="(000) 000-0000")
-        sender_email = st.text_input("Sender Email", value="you@example.com")
-        notes = st.text_area("Optional notes to emphasize (kept factual)", value="", height=100)
+        company = st.text_input("Company", value=st.session_state.header.get("company", ""))
+        role = st.text_input("Role / Position", value=st.session_state.header.get("role", ""))
+        receiver = st.text_input("Receiver (e.g., Hiring Manager \\\\ Company)", value=st.session_state.header.get("receiver", "Hiring Manager"))
+        greeting = st.text_input("Greeting (Dear ___,)", value=st.session_state.header.get("greeting", "Hiring Manager"))
+        sender_title = st.text_input("Sender Title (under \\name{})", value=st.session_state.header.get("sender_title", "Applicant"))
+        sender_city = st.text_input("Sender City", value=st.session_state.header.get("sender_city", ""))
+        sender_phone = st.text_input("Sender Phone", value=st.session_state.header.get("sender_phone", ""))
+        sender_email = st.text_input("Sender Email", value=st.session_state.header.get("sender_email", ""))
+        notes = st.text_area("Optional notes to emphasize (kept factual)", value=st.session_state.header.get("notes", ""), height=100)
         gen_cover = st.form_submit_button("Generate LaTeX Cover Letter", use_container_width=True)
 
     if gen_cover:
+        # persist fields
+        st.session_state.header.update({
+            "company": company, "role": role, "receiver": receiver, "greeting": greeting,
+            "sender_title": sender_title, "sender_city": sender_city,
+            "sender_phone": sender_phone, "sender_email": sender_email, "notes": notes
+        })
+
+        # escape
+        name_e = escape_tex(st.session_state.header.get("name", ""))
+        receiver_e = escape_tex(receiver)
+        greeting_e = escape_tex(greeting)
+        sender_title_e = escape_tex(sender_title)
+        sender_city_e = escape_tex(sender_city)
+        sender_phone_e = escape_tex(sender_phone)
+        sender_email_e = escape_tex(sender_email)
+        company_e = escape_tex(company)
+        role_e = escape_tex(role)
+        notes_e = escape_tex(notes)
+
         with st.spinner("Drafting LaTeX cover letter..."):
             cl_prompt = COVER_LETTER_LATEX_PROMPT_TMPL.format(
-                tailored_resume=st.session_state.tailored_latex,
-                company=company,
-                role=role,
-                notes=notes
-            ) % {
-                "name": name,
-                "sender_title": sender_title,
-                "receiver": receiver,
-                "greeting": greeting,
-                "sender_city": sender_city,
-                "sender_phone": sender_phone,
-                "sender_email": sender_email,
-            }
+                LATEX_LETTER_TEMPLATE=LATEX_LETTER_TEMPLATE,
+                name=name_e, sender_title=sender_title_e,
+                receiver=receiver_e, greeting=greeting_e,
+                sender_city=sender_city_e, sender_phone=sender_phone_e, sender_email=sender_email_e,
+                company=company_e, role=role_e, notes=notes_e,
+                tailored_resume=st.session_state.tailored_latex
+            )
             latex_cover = call_gemini(cl_prompt, temperature=0.6)
+            latex_cover = until_marker(latex_cover, "[END_LATEX_COVER]")
             st.code(latex_cover, language="latex")
 
 st.caption("ReadysetRole — LaTeX-first ATS Tailoring (no fabrication)")
