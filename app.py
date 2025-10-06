@@ -1,14 +1,14 @@
 # --- Imports ---------------------------------------------------------------
 import os
-import json
 import re
+import io
+import json
 import streamlit as st
 from PIL import Image
 from google import genai
 from google.genai import types
 import PyPDF2
 import docx
-import io
 
 # --- Secrets ---------------------------------------------------------------
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -24,71 +24,289 @@ def load_identity() -> str:
         with open("identity.txt") as f:
             return f.read()
     except FileNotFoundError:
-        st.warning("⚠️ 'identity.txt' not found. Using default prompt.")
-        return "You are ReadysetRole, a resume optimization assistant."
+        return ("You are ReadysetRole, an ATS resume assistant. "
+                "Never fabricate. Use headings: Summary, Skills, Professional Experience, Projects, Education, Certifications.")
 
-system_instructions = load_identity()
+SYSTEM_INSTRUCTIONS = load_identity()
 
 # --- Helper Functions ------------------------------------------------------
 def parse_resume_file(uploaded_file) -> str:
     """Extract text from PDF, DOCX, or TXT file"""
     try:
         if uploaded_file.type == "application/pdf":
-            pdf_reader = PyPDF2.PdfReader(io.BytesIO(uploaded_file.read()))
+            reader = PyPDF2.PdfReader(io.BytesIO(uploaded_file.read()))
             text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text()
+            for p in reader.pages:
+                try:
+                    text += p.extract_text() or ""
+                except Exception:
+                    pass
             return text
         elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            doc = docx.Document(io.BytesIO(uploaded_file.read()))
-            return "\n".join([para.text for para in doc.paragraphs])
-        elif uploaded_file.type == "text/plain":
-            return uploaded_file.read().decode("utf-8")
+            docf = docx.Document(io.BytesIO(uploaded_file.read()))
+            return "\n".join(para.text for para in docf.paragraphs)
         else:
-            return uploaded_file.read().decode("utf-8")
+            return uploaded_file.read().decode("utf-8", errors="ignore")
     except Exception as e:
         st.error(f"Error parsing file: {e}")
         return ""
 
-def call_gemini(prompt: str, temperature: float = 1.0) -> str:
-    """Call Gemini API with error handling"""
+def call_gemini(prompt: str, temperature: float = 0.5, json_only: bool = False) -> str:
+    """Call Gemini API with basic error handling"""
     try:
-        generation_cfg = types.GenerateContentConfig(
-            system_instruction=system_instructions,
+        cfg = types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTIONS,
             temperature=temperature,
             max_output_tokens=8000,
+            response_mime_type="application/json" if json_only else None,
         )
-        
         resp = client.models.generate_content(
             model="gemini-2.0-flash-exp",
             contents=[types.Content(parts=[types.Part(text=prompt)])],
-            config=generation_cfg,
+            config=cfg,
         )
         return resp.text or ""
     except Exception as e:
         st.error(f"Gemini API error: {e}")
         return ""
 
-def extract_json_from_response(text: str):
-    """Extract JSON from markdown code blocks or raw text - improved"""
+def extract_json(text: str):
+    """Extract first valid JSON object/array from text."""
     try:
-        # Try to find JSON in code blocks first
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```', text, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group(1))
-        
-        # Try to find JSON object/array anywhere in text
-        json_match = re.search(r'(\{.*?\}|\[.*?\])', text, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group(1))
-        
-        # Try parsing entire text as JSON
+        # fenced
+        m = re.search(r'```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```', text, re.DOTALL)
+        if m:
+            return json.loads(m.group(1))
+        # anywhere
+        m = re.search(r'(\{.*?\}|\[.*?\])', text, re.DOTALL)
+        if m:
+            return json.loads(m.group(1))
+        # raw
         return json.loads(text)
-    except Exception as e:
-        # Return empty dict/list if parsing fails
-        return {} if '{' in text else []
+    except Exception:
+        return None
 
-# --- Session State Init ----------------------------------------------------
+# --- ATS Prompts -----------------------------------------------------------
+SCORE_PROMPT_TMPL = """Return ONLY a JSON object with the fields below (numbers 0–100).
+
+Analyze the resume against the JD.
+
+RESUME:
+{resume}
+
+JOB DESCRIPTION:
+{jd}
+
+Return:
+{{
+  "overall_score": 0,
+  "skills_fit": 0,
+  "experience_fit": 0,
+  "education_fit": 0,
+  "ats_keywords_coverage": 0
+}}
+"""
+
+TAILOR_PROMPT_TMPL = """Tailor the resume to the JD using the ATS rules below. 
+DO NOT FABRICATE. Use <METRIC_TBD> where impact is missing.
+
+Rules:
+- Single column, ATS-safe, headings: Summary, Skills, Professional Experience, Projects, Education, Certifications (omit if N/A)
+- Bullet style: Action → What → How/Tools → Impact
+- Use JD keywords naturally ONLY if supported by resume evidence
+- 1 page if <=8y experience, else max 2 pages
+- End output with [END_RESUME]
+
+ORIGINAL RESUME:
+{resume}
+
+JOB DESCRIPTION:
+{jd}
+
+Generate the tailored resume:
+"""
+
+COVER_LETTER_PROMPT_TMPL = """Write a concise cover letter (180–250 words) grounded ONLY in the tailored resume below.
+Use the following details if provided.
+
+Company: {company}
+Role: {role}
+Receiver: {receiver}
+UserNotes (optional): {notes}
+
+TAILORED RESUME:
+{tailored}
+
+Return plain paragraphs (no greeting macros). End with [END_COVER].
+"""
+
+# --- LaTeX Builders --------------------------------------------------------
+LATEX_RESUME_SHELL = r"""
+\documentclass[10pt]{article}
+\usepackage[margin=0.5in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+\pagestyle{empty}
+
+\titlespacing*{\section}{0pt}{4pt}{2pt}
+\setlist[itemize]{noitemsep, topsep=2pt, leftmargin=1.2em}
+
+\begin{document}
+
+{\Large \bfseries %(name)s} \\[6pt]
+%(location)s — %(phone)s — \href{mailto:%(email)s}{%(email)s} — %
+\href{%(portfolio_url)s}{%(portfolio_label)s} — %
+\href{%(linkedin_url)s}{%(linkedin_label)s}
+
+\vspace{4pt}\hrule\vspace{4pt}
+
+\section*{Summary}
+%(summary)s
+
+\vspace{4pt}\hrule\vspace{4pt}
+
+\section*{Education}
+%(education)s
+
+\vspace{4pt}\hrule\vspace{4pt}
+
+\section*{Professional Experience}
+%(experience)s
+
+\vspace{4pt}\hrule\vspace{4pt}
+
+\section*{Selected Projects}
+%(projects)s
+
+\vspace{4pt}\hrule\vspace{4pt}
+
+\section*{Skills}
+%(skills)s
+
+%(certs_block)s
+
+\end{document}
+"""
+
+LATEX_CERTS_BLOCK = r"""
+\vspace{4pt}\hrule\vspace{4pt}
+\section*{Certifications}
+%s
+"""
+
+def split_sections(tailored_text: str) -> dict:
+    """
+    Parse Gemini output into sections by headings.
+    Expected headings: Summary, Skills, Professional Experience, Projects, Education, Certifications
+    """
+    # normalize
+    t = re.sub(r'\r', '', tailored_text)
+    # grab until [END_RESUME]
+    t = re.split(r'\[END_RESUME\]', t, flags=re.IGNORECASE)[0]
+
+    def grab(label):
+        pat = rf'^\s*{label}\s*\n(.*?)(?=^\s*(Summary|Skills|Professional Experience|Projects|Education|Certifications)\s*$|\Z)'
+        m = re.search(pat, t, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        return (m.group(1).strip() if m else "")
+
+    return {
+        "summary": grab("Summary"),
+        "skills": grab("Skills"),
+        "experience": grab("Professional\s+Experience"),
+        "projects": grab("Projects"),
+        "education": grab("Education"),
+        "certifications": grab("Certifications"),
+    }
+
+def to_latex_itemize(plain: str) -> str:
+    """
+    Convert plaintext bullets to LaTeX itemize safely.
+    Accepts lines with '-' or '•' or '*' or numbered bullets.
+    """
+    # split blocks into bullet lines
+    lines = [ln.strip() for ln in plain.splitlines() if ln.strip()]
+    # heuristics: keep roles with inline bullets: handle `-` etc.
+    out = []
+    buffer_role = []
+    for ln in lines:
+        if re.match(r'^[A-Za-z].+?\|', ln) or re.match(r'^\*\*.+\*\*', ln):
+            # likely a role header, push buffered
+            if buffer_role:
+                out.append("\\begin{itemize}")
+                for b in buffer_role:
+                    out.append(f"  \\item {b}")
+                out.append("\\end{itemize}\n")
+                buffer_role = []
+            out.append(ln)
+        elif re.match(r'^(\-|\*|•|\d+\.)\s+', ln):
+            buffer_role.append(re.sub(r'^(\-|\*|•|\d+\.)\s+', '', ln))
+        else:
+            out.append(ln)
+
+    if buffer_role:
+        out.append("\\begin{itemize}")
+        for b in buffer_role:
+            out.append(f"  \\item {b}")
+        out.append("\\end{itemize}\n")
+
+    return "\n".join(out) if out else plain
+
+def build_resume_latex(tailored: str,
+                       name="Your Name",
+                       location="City, ST",
+                       phone="(000) 000-0000",
+                       email="you@example.com",
+                       portfolio_url="https://example.com",
+                       portfolio_label="example.com",
+                       linkedin_url="https://www.linkedin.com/in/your-handle/",
+                       linkedin_label="linkedin.com/in/your-handle") -> str:
+    sec = split_sections(tailored)
+
+    certs_block = ""
+    if sec.get("certifications"):
+        certs_block = LATEX_CERTS_BLOCK % (to_latex_itemize(sec["certifications"]))
+
+    payload = {
+        "name": name,
+        "location": location,
+        "phone": phone,
+        "email": email,
+        "portfolio_url": portfolio_url,
+        "portfolio_label": portfolio_label,
+        "linkedin_url": linkedin_url,
+        "linkedin_label": linkedin_label,
+        "summary": sec["summary"],
+        "education": to_latex_itemize(sec["education"]),
+        "experience": to_latex_itemize(sec["experience"]),
+        "projects": to_latex_itemize(sec["projects"]),
+        "skills": to_latex_itemize(sec["skills"]),
+        "certs_block": certs_block,
+    }
+    return LATEX_RESUME_SHELL % payload
+
+LATEX_COVER_LETTER_SHELL = r"""
+\input{setup/preamble.tex}
+\input{setup/macros.tex}
+
+\begin{document}
+\name{%s}{%s}
+\receiver{%s}
+
+\para{Dear %s,}
+
+\para{%s}
+
+\para{Thank you for considering my application. I would welcome the opportunity to contribute and to discuss how my background aligns with your needs.}
+
+\bottom{%s}{%s}{%s}
+
+\end{document}
+"""
+
+# --- Session State ---------------------------------------------------------
 if 'master_resume' not in st.session_state:
     st.session_state.master_resume = None
 if 'master_resume_name' not in st.session_state:
@@ -99,527 +317,140 @@ if 'tailored_resume' not in st.session_state:
     st.session_state.tailored_resume = None
 if 'scores' not in st.session_state:
     st.session_state.scores = {}
-if 'evidence_map' not in st.session_state:
-    st.session_state.evidence_map = []
-if 'change_log' not in st.session_state:
-    st.session_state.change_log = []
-if 'refinement_packs' not in st.session_state:
-    st.session_state.refinement_packs = []
-if 'current_tool' not in st.session_state:
-    st.session_state.current_tool = None
-if 'selected_packs' not in st.session_state:
-    st.session_state.selected_packs = set()
 
-# --- Page Config -----------------------------------------------------------
-st.set_page_config(
-    page_title="ReadysetRole - Resume Optimizer",
-    page_icon="⚡",
-    layout="wide"
-)
+# --- Page Config & Minimal Styling -----------------------------------------
+st.set_page_config(page_title="ReadysetRole - Resume Optimizer", page_icon="⚡", layout="wide")
 
-# --- Custom CSS ------------------------------------------------------------
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
-    
-    .stApp {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-        font-family: 'Inter', sans-serif;
-    }
-    
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    .stDeployButton {display: none;}
-    
-    .stApp, .stApp * {
-        color: #e0e0e0 !important;
-    }
-    
-    .stApp > div > div {
-        background: transparent !important;
-    }
-    
-    .stFileUploader {
-        background: rgba(30, 30, 46, 0.8) !important;
-        border: 2px dashed #7e22ce !important;
-        border-radius: 16px !important;
-        padding: 2rem !important;
-    }
-    
-    .stFileUploader label {
-        color: #a78bfa !important;
-        font-weight: 700 !important;
-        font-size: 1.2rem !important;
-    }
-    
-    .stTextArea textarea {
-        background: #1e1e2e !important;
-        color: #e0e0e0 !important;
-        border: 2px solid #7e22ce !important;
-        border-radius: 12px !important;
-    }
-    
-    .stTextArea label {
-        color: #a78bfa !important;
-        font-weight: 600 !important;
-    }
-    
-    .stButton button {
-        background: linear-gradient(135deg, #7e22ce 0%, #6d28d9 100%) !important;
-        color: white !important;
-        border: none !important;
-        border-radius: 12px !important;
-        padding: 0.75rem 1.5rem !important;
-        font-weight: 700 !important;
-        transition: all 0.3s ease !important;
-    }
-    
-    .stButton button:hover {
-        transform: translateY(-2px) !important;
-        box-shadow: 0 8px 25px rgba(126, 34, 206, 0.4) !important;
-    }
-    
-    .stButton button[kind="primary"] {
-        background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
-        font-size: 1.1rem !important;
-        padding: 1rem 2rem !important;
-    }
-    
-    .stRadio {
-        background: rgba(30, 30, 46, 0.6) !important;
-        padding: 1rem !important;
-        border-radius: 12px !important;
-    }
-    
-    .score-card {
-        background: linear-gradient(135deg, #1e3c72 0%, #7e22ce 100%);
-        color: white !important;
-        padding: 2rem;
-        border-radius: 20px;
-        text-align: center;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-    }
-    
-    .score-number {
-        font-size: 4rem !important;
-        font-weight: 800 !important;
-        color: white !important;
-    }
-    
-    .score-label {
-        font-size: 0.9rem !important;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        color: white !important;
-    }
-    
-    .delta-positive {
-        color: #10b981 !important;
-        font-size: 2.5rem !important;
-        font-weight: 700 !important;
-    }
-    
-    .stMetric {
-        background: rgba(126, 34, 206, 0.2) !important;
-        padding: 1rem !important;
-        border-radius: 12px !important;
-    }
-    
-    .stMetric label {
-        color: #a78bfa !important;
-    }
-    
-    .stMetric [data-testid="stMetricValue"] {
-        color: white !important;
-        font-size: 1.8rem !important;
-    }
-    
-    .evidence-row {
-        background: rgba(126, 34, 206, 0.15);
-        border-left: 4px solid #7e22ce;
-        padding: 1rem;
-        border-radius: 12px;
-        margin-bottom: 0.8rem;
-    }
-    
-    .jd-anchor {
-        font-weight: 600 !important;
-        color: #a78bfa !important;
-    }
-    
-    .resume-match {
-        color: #d1d5db !important;
-        margin-top: 0.5rem;
-    }
-    
-    .badge-verified {
-        background: #10b981 !important;
-        color: white !important;
-        padding: 0.2rem 0.6rem;
-        border-radius: 6px;
-        font-size: 0.75rem;
-        margin-left: 0.5rem;
-    }
-    
-    .badge-pending {
-        background: #f59e0b !important;
-        color: white !important;
-        padding: 0.2rem 0.6rem;
-        border-radius: 6px;
-        font-size: 0.75rem;
-        margin-left: 0.5rem;
-    }
-    
-    .change-item {
-        background: rgba(30, 60, 114, 0.2);
-        padding: 1rem;
-        border-radius: 12px;
-        margin-bottom: 0.8rem;
-        border-left: 4px solid #3b82f6;
-    }
-    
-    .change-before {
-        color: #ef4444 !important;
-        text-decoration: line-through;
-    }
-    
-    .change-after {
-        color: #10b981 !important;
-        font-weight: 600 !important;
-    }
-    
-    .change-why {
-        color: #9ca3af !important;
-        font-style: italic;
-    }
-    
-    .resume-output {
-        background: #0f0f1e !important;
-        color: #e5e7eb !important;
-        padding: 1.5rem;
-        border-radius: 16px;
-        font-family: 'Courier New', monospace !important;
-        font-size: 0.85rem;
-        line-height: 1.7;
-        max-height: 600px;
-        overflow-y: auto;
-        white-space: pre-wrap;
-        border: 2px solid rgba(126, 34, 206, 0.3);
-    }
-    
-    .stCheckbox label {
-        color: #e0e0e0 !important;
-        font-weight: 600 !important;
-    }
-    
-    .stExpander {
-        background: rgba(30, 30, 46, 0.6) !important;
-        border: 1px solid rgba(126, 34, 206, 0.3) !important;
-        border-radius: 12px !important;
-    }
-    
-    .stDownloadButton button {
-        background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
-    }
-    
-    .stAlert, .stInfo {
-        background: rgba(126, 34, 206, 0.2) !important;
-        border: 2px solid #7e22ce !important;
-        color: #e0e0e0 !important;
-    }
-    
-    .stSuccess {
-        background: rgba(16, 185, 129, 0.2) !important;
-        border: 2px solid #10b981 !important;
-    }
-    
-    .no-fabrication {
-        background: linear-gradient(135deg, #059669 0%, #10b981 100%) !important;
-        color: white !important;
-        padding: 1rem 1.5rem;
-        border-radius: 12px;
-        text-align: center;
-        font-weight: 700 !important;
-        margin: 1.5rem 0;
-    }
-    
-    h1, h2, h3, h4, h5, h6 {
-        color: white !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align:center;'>⚡ ReadysetRole</h1>", unsafe_allow_html=True)
+st.caption("AutoTailor your resume • Evidence-only • Zero fabrication")
 
-# --- Header ----------------------------------------------------------------
-st.markdown("""
-<div style="text-align: center; padding: 2rem 0;">
-    <h1 style="font-size: 3rem; font-weight: 800; margin-bottom: 0.5rem;">
-        ⚡ ReadysetRole
-    </h1>
-    <p style="font-size: 1.1rem; color: #9ca3af;">AutoTailor your resume instantly • Evidence-only • Zero fabrication</p>
-</div>
-""", unsafe_allow_html=True)
+# --- Uploads ---------------------------------------------------------------
+st.subheader("📤 Upload Your Documents")
 
-# --- Top: Document Uploads (Full Width) ------------------------------------
-st.markdown("### 📤 Upload Your Documents")
+c1, c2 = st.columns(2)
 
-col_resume_upload, col_jd_upload = st.columns(2)
+with c1:
+    up_res = st.file_uploader("Master Resume", type=["pdf","docx","txt"], key="resume_uploader")
+    if up_res and st.session_state.master_resume is None:
+        txt = parse_resume_file(up_res)
+        if txt.strip():
+            st.session_state.master_resume = txt
+            st.session_state.master_resume_name = up_res.name
+            st.success("✅ Resume loaded")
 
-with col_resume_upload:
-    uploaded_resume = st.file_uploader(
-        "Master Resume",
-        type=["pdf", "docx", "txt"],
-        help="Upload your comprehensive resume",
-        key="resume_uploader"
-    )
-    
-    if uploaded_resume and st.session_state.master_resume is None:
-        with st.spinner("Processing resume..."):
-            resume_text = parse_resume_file(uploaded_resume)
-            if resume_text:
-                st.session_state.master_resume = resume_text
-                st.session_state.master_resume_name = uploaded_resume.name
-                st.success(f"✅ Loaded!")
-    
-    if st.session_state.master_resume:
+    if st.session_state.master_resume_name:
         st.info(f"📄 {st.session_state.master_resume_name}")
 
-with col_jd_upload:
-    jd_input_method = st.radio("Job Description", ["Paste Text", "Upload File"], horizontal=True)
-    
-    if jd_input_method == "Paste Text":
-        jd_text = st.text_area(
-            "Paste JD",
-            height=120,
-            placeholder="Paste job description...",
-            key="jd_textarea",
-            label_visibility="collapsed"
-        )
-        if st.button("🎯 AutoTailor Resume", type="primary", use_container_width=True):
-            if jd_text and st.session_state.master_resume:
-                st.session_state.current_jd = jd_text
-                st.session_state.tailored_resume = None
-                st.rerun()
+with c2:
+    jd_mode = st.radio("Job Description", ["Paste Text", "Upload File"], horizontal=True)
+    if jd_mode == "Paste Text":
+        jd_txt = st.text_area("Paste JD", height=160, label_visibility="collapsed", key="jd_textarea")
+        if st.button("Compute % Match (QuickScore)", use_container_width=True):
+            if jd_txt and st.session_state.master_resume:
+                st.session_state.current_jd = jd_txt
             else:
-                st.warning("Please upload both resume and JD first")
+                st.warning("Please upload both resume and JD first.")
     else:
-        uploaded_jd = st.file_uploader("Upload JD", type=["pdf", "docx", "txt"], key="jd_uploader")
-        if uploaded_jd and st.button("🎯 AutoTailor", type="primary", use_container_width=True):
-            jd_text = parse_resume_file(uploaded_jd)
-            if jd_text and st.session_state.master_resume:
-                st.session_state.current_jd = jd_text
-                st.session_state.tailored_resume = None
-                st.rerun()
+        up_jd = st.file_uploader("Upload JD", type=["pdf","docx","txt"], key="jd_uploader")
+        if up_jd and st.button("Compute % Match (QuickScore)", use_container_width=True):
+            jd_txt = parse_resume_file(up_jd)
+            if jd_txt and st.session_state.master_resume:
+                st.session_state.current_jd = jd_txt
+            else:
+                st.warning("Please upload both resume and JD first.")
 
-st.markdown("---")
+st.divider()
 
-# --- Main Editor: Left (Editor) + Right (Tracker) --------------------------
-col_editor, col_tracker = st.columns([2.5, 1], gap="large")
+# --- QuickScore ------------------------------------------------------------
+if st.session_state.master_resume and st.session_state.current_jd and not st.session_state.tailored_resume:
+    with st.spinner("Scoring..."):
+        score_prompt = SCORE_PROMPT_TMPL.format(
+            resume=st.session_state.master_resume[:6000],
+            jd=st.session_state.current_jd[:6000]
+        )
+        raw = call_gemini(score_prompt, temperature=0.2, json_only=False)
+        obj = extract_json(raw) or {}
+        st.session_state.scores = obj
 
-with col_editor:
-    if st.session_state.current_jd and st.session_state.master_resume and not st.session_state.tailored_resume:
-        with st.spinner("🔄 AutoTailoring your resume..."):
-            # Step 1: Pre-Score
-            score_prompt = f"""You must return ONLY a valid JSON object with scores. No other text.
+    s = st.session_state.scores or {}
+    pre = int(s.get("overall_score", 0))
+    colA, colB, colC, colD, colE = st.columns(5)
+    colA.metric("Overall Match", f"{pre}%")
+    colB.metric("Skills Fit", f"{int(s.get('skills_fit',0))}%")
+    colC.metric("Experience Fit", f"{int(s.get('experience_fit',0))}%")
+    colD.metric("Education Fit", f"{int(s.get('education_fit',0))}%")
+    colE.metric("ATS Keywords", f"{int(s.get('ats_keywords_coverage',0))}%")
 
-Analyze this resume against the job description and return scores:
+    st.success("Next: click **Generate Tailored Resume** to create ATS-safe output and LaTeX.")
+    if st.button("🎯 Generate Tailored Resume", type="primary", use_container_width=True):
+        with st.spinner("Tailoring..."):
+            tailor_prompt = TAILOR_PROMPT_TMPL.format(
+                resume=st.session_state.master_resume,
+                jd=st.session_state.current_jd
+            )
+            tailored = call_gemini(tailor_prompt, temperature=0.6)
+            st.session_state.tailored_resume = tailored
 
-RESUME:
-{st.session_state.master_resume[:3000]}
+# --- Tailored Resume + LaTeX -----------------------------------------------
+if st.session_state.tailored_resume:
+    st.subheader("📄 Tailored Resume (Plain Text)")
+    st.code(st.session_state.tailored_resume, language="markdown")
 
-JOB DESCRIPTION:
-{st.session_state.current_jd[:3000]}
+    with st.expander("🧩 Overleaf-ready LaTeX (Resume)"):
+        # Minimal header inputs so user can control the LaTeX header
+        name = st.text_input("Name", value="Your Name")
+        location = st.text_input("Location", value="City, ST")
+        phone = st.text_input("Phone", value="(000) 000-0000")
+        email = st.text_input("Email", value="you@example.com")
+        portfolio_url = st.text_input("Portfolio URL", value="https://example.com")
+        portfolio_label = st.text_input("Portfolio Label", value="example.com")
+        linkedin_url = st.text_input("LinkedIn URL", value="https://www.linkedin.com/in/your-handle/")
+        linkedin_label = st.text_input("LinkedIn Label", value="linkedin.com/in/your-handle")
 
-Return this JSON structure with numbers 0-100:
-{{
-  "overall_score": 75,
-  "skills_fit": 80,
-  "experience_fit": 70,
-  "education_fit": 85,
-  "ats_keywords_coverage": 65
-}}"""
-            
-            pre_response = call_gemini(score_prompt, 0.2)
-            pre_scores = extract_json_from_response(pre_response)
-            
-            # Step 2: Tailor Resume
-            tailor_prompt = f"""Tailor this resume to match the job description. Follow these rules:
+        if st.button("Build LaTeX Resume", use_container_width=True):
+            latex_resume = build_resume_latex(
+                st.session_state.tailored_resume,
+                name, location, phone, email,
+                portfolio_url, portfolio_label,
+                linkedin_url, linkedin_label
+            )
+            st.code(latex_resume, language="latex")
 
-RULES:
-- ATS-safe format: single column, plain text, standard headings
-- Use keywords from JD ONLY where resume provides evidence
-- Bullet format: Action → What → How/Tools → Impact
-- Insert <METRIC_TBD> where metrics are missing
-- Never fabricate information
-- End with [END_RESUME]
+    st.divider()
 
-ORIGINAL RESUME:
-{st.session_state.master_resume}
-
-JOB DESCRIPTION:
-{st.session_state.current_jd}
-
-Generate the tailored resume:"""
-            
-            st.session_state.tailored_resume = call_gemini(tailor_prompt, 0.7)
-            
-            # Step 3: Post-Score
-            post_response = call_gemini(score_prompt.replace(st.session_state.master_resume[:3000], st.session_state.tailored_resume[:3000]), 0.2)
-            post_scores = extract_json_from_response(post_response)
-            
-            st.session_state.scores = {'pre': pre_scores, 'post': post_scores}
-            
-            # Step 4: Evidence Map
-            evidence_prompt = f"""Return ONLY a JSON array mapping JD requirements to resume evidence.
-
-JOB DESCRIPTION:
-{st.session_state.current_jd[:2000]}
-
-TAILORED RESUME:
-{st.session_state.tailored_resume[:2000]}
-
-Return this format:
-[
-  {{"jd_anchor": "5+ years Python", "resume_match": "6 years Python at TechCorp", "verified": true}},
-  {{"jd_anchor": "ML deployment", "resume_match": "Deployed 15 models using TensorFlow", "verified": true}}
-]"""
-            
-            evidence_response = call_gemini(evidence_prompt, 0.3)
-            evidence_data = extract_json_from_response(evidence_response)
-            st.session_state.evidence_map = evidence_data if isinstance(evidence_data, list) else []
-            
-            # Step 5: Change Log
-            changelog_prompt = f"""Return ONLY a JSON array showing key changes.
-
-ORIGINAL:
-{st.session_state.master_resume[:2000]}
-
-TAILORED:
-{st.session_state.tailored_resume[:2000]}
-
-Return this format:
-[
-  {{"before": "Built pipelines", "after": "Architected real-time pipelines using Kafka", "why": "JD emphasizes real-time processing"}}
-]"""
-            
-            changelog_response = call_gemini(changelog_prompt, 0.3)
-            changelog_data = extract_json_from_response(changelog_response)
-            st.session_state.change_log = changelog_data if isinstance(changelog_data, list) else []
-            
-            # Step 6: Refinement Packs
-            packs_prompt = f"""Return ONLY a JSON array with 3 keyword packs.
-
-JOB DESCRIPTION:
-{st.session_state.current_jd[:2000]}
-
-RESUME:
-{st.session_state.tailored_resume[:2000]}
-
-Return this format:
-[
-  {{"title": "Pack 1: Tech Stack", "lift": "+5%", "tokens": ["Python", "AWS", "Docker"], "jd_evidence": "requires Python and cloud", "resume_evidence": "has Python, AWS experience"}}
-]"""
-            
-            packs_response = call_gemini(packs_prompt, 0.5)
-            packs_data = extract_json_from_response(packs_response)
-            st.session_state.refinement_packs = packs_data if isinstance(packs_data, list) else []
-            
-            st.rerun()
-    
-    if st.session_state.tailored_resume:
-        st.markdown("### 📄 Tailored Resume")
-        st.markdown(f'<div class="resume-output">{st.session_state.tailored_resume}</div>', unsafe_allow_html=True)
-        
+    # --- Optional Cover Letter --------------------------------------------
+    st.subheader("✉️ Optional: Generate Cover Letter (LaTeX)")
+    with st.form("cover_form"):
+        gen_cover = st.checkbox("Yes, generate a cover letter")
         col1, col2 = st.columns(2)
         with col1:
-            st.download_button("💾 Download", st.session_state.tailored_resume, "resume.txt", use_container_width=True)
+            company = st.text_input("Company", value="")
+            role = st.text_input("Role / Position", value="")
+            receiver = st.text_input("Receiver (e.g., Hiring Manager \\\\ Company)", value="Hiring Manager")
+            greeting_name = st.text_input("Greeting (Dear ___,)", value="Hiring Manager")
         with col2:
-            if st.button("📋 Show Code", use_container_width=True):
-                st.code(st.session_state.tailored_resume)
-        
-        if st.session_state.change_log:
-            with st.expander("📝 Change Log"):
-                for item in st.session_state.change_log:
-                    st.markdown(f'<div class="change-item"><div class="change-before">{item.get("before","")}</div><div class="change-after">{item.get("after","")}</div><div class="change-why">{item.get("why","")}</div></div>', unsafe_allow_html=True)
-        
-        if st.session_state.evidence_map:
-            with st.expander("📍 Evidence Map"):
-                for item in st.session_state.evidence_map:
-                    badge = "verified" if item.get('verified') else "pending"
-                    st.markdown(f'<div class="evidence-row"><div class="jd-anchor">{item.get("jd_anchor","")}</div><div class="resume-match">→ {item.get("resume_match","")} <span class="badge-{badge}">{"✅" if badge=="verified" else "◻︎"}</span></div></div>', unsafe_allow_html=True)
-        
-        if st.session_state.current_tool == "1" and st.session_state.refinement_packs:
-            st.markdown("### 🎯 Refinement Packs")
-            for idx, pack in enumerate(st.session_state.refinement_packs):
-                checked = st.checkbox(f"{pack.get('title','')} {pack.get('lift','')}", key=f"p{idx}", value=idx in st.session_state.selected_packs)
-                if checked:
-                    st.session_state.selected_packs.add(idx)
-                    st.caption("Tokens: " + ", ".join(pack.get('tokens',[])))
-                else:
-                    st.session_state.selected_packs.discard(idx)
-            
-            if st.button("Apply Packs", type="primary", use_container_width=True) and st.session_state.selected_packs:
-                with st.spinner("Applying packs..."):
-                    packs = [st.session_state.refinement_packs[i] for i in st.session_state.selected_packs]
-                    apply_prompt = f"""Apply these keyword packs to the resume. Only add where evidence exists.
+            sender_title = st.text_input("Sender Title (under \\name{})", value="Applicant")
+            sender_city = st.text_input("Sender City", value="City, ST")
+            sender_phone = st.text_input("Sender Phone", value="(000) 000-0000")
+            sender_email = st.text_input("Sender Email", value="you@example.com")
+        notes = st.text_area("Optional notes to emphasize (kept factual)", value="", height=100)
+        submitted = st.form_submit_button("Generate Cover Letter (LaTeX)")
+    if submitted and gen_cover:
+        with st.spinner("Drafting cover letter..."):
+            cl_prompt = COVER_LETTER_PROMPT_TMPL.format(
+                company=company, role=role, receiver=receiver,
+                notes=notes, tailored=st.session_state.tailored_resume
+            )
+            body = call_gemini(cl_prompt, temperature=0.6)
+            body = re.split(r'\[END_COVER\]', body)[0].strip()
 
-PACKS TO APPLY:
-{json.dumps(packs, indent=2)}
+            latex_letter = LATEX_COVER_LETTER_SHELL % (
+                name, sender_title,
+                (receiver if receiver else "Hiring Manager"),
+                (greeting_name if greeting_name else "Hiring Manager"),
+                body,
+                sender_city, sender_phone, sender_email
+            )
+            st.code(latex_letter, language="latex")
 
-CURRENT RESUME:
-{st.session_state.tailored_resume}
-
-JOB DESCRIPTION:
-{st.session_state.current_jd}
-
-Return updated resume ending with [END_RESUME]:"""
-                    
-                    st.session_state.tailored_resume = call_gemini(apply_prompt, 0.7)
-                    st.session_state.selected_packs = set()
-                    st.session_state.current_tool = None
-                    st.rerun()
-        
-        st.markdown('<div class="no-fabrication">🔒 No fabrication: Resume + JD only</div>', unsafe_allow_html=True)
-
-with col_tracker:
-    st.markdown("### 📊 Score Tracker")
-    
-    if st.session_state.scores:
-        pre = st.session_state.scores.get('pre', {})
-        post = st.session_state.scores.get('post', {})
-        
-        pre_overall = int(pre.get('overall_score', 0))
-        post_overall = int(post.get('overall_score', 0))
-        delta = post_overall - pre_overall
-        
-        st.markdown(f'<div class="score-card"><div style="display:flex;justify-content:space-around;align-items:center"><div><div class="score-number">{pre_overall}</div><div class="score-label">PRE</div></div><div class="delta-positive">+{delta}</div><div><div class="score-number">{post_overall}</div><div class="score-label">POST</div></div></div></div>', unsafe_allow_html=True)
-        
-        st.markdown("#### Subscores")
-        for key, lbl in [('skills_fit','Skills'),('experience_fit','Experience'),('ats_keywords_coverage','ATS'),('education_fit','Education')]:
-            val = int(post.get(key, 0))
-            st.metric(lbl, f"{val}%")
-    
-    if st.session_state.tailored_resume:
-        st.markdown("---")
-        st.markdown("### 🎯 Actions")
-        actions = [("1","Refine","🎯"),("2","Boosters","✨"),("3","Coverage","📊"),("4","Presets","🎭"),("5","A/B","🔀"),("6","Level","⚖️"),("0","Next JD","🔄")]
-        
-        for num, lbl, ico in actions:
-            if st.button(f"{ico} {lbl}", key=f"o{num}", use_container_width=True):
-                if num == "0":
-                    st.session_state.current_jd = None
-                    st.session_state.tailored_resume = None
-                    st.session_state.scores = {}
-                    st.session_state.evidence_map = []
-                    st.session_state.change_log = []
-                    st.session_state.refinement_packs = []
-                    st.session_state.current_tool = None
-                    st.session_state.selected_packs = set()
-                    st.rerun()
-                else:
-                    st.session_state.current_tool = num
-                    st.rerun()
-
-st.markdown("---")
-st.caption("Built with Streamlit + Gemini 2.0 Flash | ReadysetRole v1.0")
+st.caption("Built with Streamlit + Gemini 2.0 Flash | ReadysetRole v2 (simple flow)")
