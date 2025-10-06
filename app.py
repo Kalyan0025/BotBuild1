@@ -69,15 +69,24 @@ def call_gemini(prompt: str, temperature: float = 1.0) -> str:
         st.error(f"Gemini API error: {e}")
         return ""
 
-def extract_json_from_response(text: str) -> dict:
-    """Extract JSON from markdown code blocks or raw text"""
+def extract_json_from_response(text: str):
+    """Extract JSON from markdown code blocks or raw text - improved"""
     try:
+        # Try to find JSON in code blocks first
         json_match = re.search(r'```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```', text, re.DOTALL)
         if json_match:
             return json.loads(json_match.group(1))
+        
+        # Try to find JSON object/array anywhere in text
+        json_match = re.search(r'(\{.*?\}|\[.*?\])', text, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group(1))
+        
+        # Try parsing entire text as JSON
         return json.loads(text)
-    except:
-        return {}
+    except Exception as e:
+        # Return empty dict/list if parsing fails
+        return {} if '{' in text else []
 
 # --- Session State Init ----------------------------------------------------
 if 'master_resume' not in st.session_state:
@@ -392,11 +401,13 @@ with col_jd_upload:
                 st.session_state.current_jd = jd_text
                 st.session_state.tailored_resume = None
                 st.rerun()
+            else:
+                st.warning("Please upload both resume and JD first")
     else:
         uploaded_jd = st.file_uploader("Upload JD", type=["pdf", "docx", "txt"], key="jd_uploader")
         if uploaded_jd and st.button("🎯 AutoTailor", type="primary", use_container_width=True):
             jd_text = parse_resume_file(uploaded_jd)
-            if jd_text:
+            if jd_text and st.session_state.master_resume:
                 st.session_state.current_jd = jd_text
                 st.session_state.tailored_resume = None
                 st.rerun()
@@ -408,44 +419,112 @@ col_editor, col_tracker = st.columns([2.5, 1], gap="large")
 
 with col_editor:
     if st.session_state.current_jd and st.session_state.master_resume and not st.session_state.tailored_resume:
-        with st.spinner("🔄 AutoTailoring..."):
-            score_prompt = f"""Analyze fit. Return JSON: {{"overall_score": 0-100, "skills_fit": 0-100, "experience_fit": 0-100, "education_fit": 0-100, "ats_keywords_coverage": 0-100}}
+        with st.spinner("🔄 AutoTailoring your resume..."):
+            # Step 1: Pre-Score
+            score_prompt = f"""You must return ONLY a valid JSON object with scores. No other text.
 
-RESUME: {st.session_state.master_resume[:2000]}
-JD: {st.session_state.current_jd[:2000]}"""
-            
-            pre_scores = extract_json_from_response(call_gemini(score_prompt, 0.3))
-            
-            tailor_prompt = f"""Tailor resume to JD. ATS-safe, single column. Use JD keywords only if evidenced. Format: Action→What→How→Impact. Insert <METRIC_TBD> if missing metrics. End with [END_RESUME].
+Analyze this resume against the job description and return scores:
 
-RESUME: {st.session_state.master_resume}
-JD: {st.session_state.current_jd}"""
+RESUME:
+{st.session_state.master_resume[:3000]}
+
+JOB DESCRIPTION:
+{st.session_state.current_jd[:3000]}
+
+Return this JSON structure with numbers 0-100:
+{{
+  "overall_score": 75,
+  "skills_fit": 80,
+  "experience_fit": 70,
+  "education_fit": 85,
+  "ats_keywords_coverage": 65
+}}"""
+            
+            pre_response = call_gemini(score_prompt, 0.2)
+            pre_scores = extract_json_from_response(pre_response)
+            
+            # Step 2: Tailor Resume
+            tailor_prompt = f"""Tailor this resume to match the job description. Follow these rules:
+
+RULES:
+- ATS-safe format: single column, plain text, standard headings
+- Use keywords from JD ONLY where resume provides evidence
+- Bullet format: Action → What → How/Tools → Impact
+- Insert <METRIC_TBD> where metrics are missing
+- Never fabricate information
+- End with [END_RESUME]
+
+ORIGINAL RESUME:
+{st.session_state.master_resume}
+
+JOB DESCRIPTION:
+{st.session_state.current_jd}
+
+Generate the tailored resume:"""
             
             st.session_state.tailored_resume = call_gemini(tailor_prompt, 0.7)
-            post_scores = extract_json_from_response(call_gemini(score_prompt.replace(st.session_state.master_resume[:2000], st.session_state.tailored_resume[:2000]), 0.3))
+            
+            # Step 3: Post-Score
+            post_response = call_gemini(score_prompt.replace(st.session_state.master_resume[:3000], st.session_state.tailored_resume[:3000]), 0.2)
+            post_scores = extract_json_from_response(post_response)
             
             st.session_state.scores = {'pre': pre_scores, 'post': post_scores}
             
-            evidence_prompt = f"""Map JD to resume. Return JSON array: [{{"jd_anchor": "req", "resume_match": "evidence", "verified": bool}}]
+            # Step 4: Evidence Map
+            evidence_prompt = f"""Return ONLY a JSON array mapping JD requirements to resume evidence.
 
-JD: {st.session_state.current_jd[:1500]}
-RESUME: {st.session_state.tailored_resume[:1500]}"""
-            
-            st.session_state.evidence_map = extract_json_from_response(call_gemini(evidence_prompt, 0.3)) or []
-            
-            changelog_prompt = f"""Show changes. Return JSON: [{{"before": "old", "after": "new", "why": "reason"}}]
+JOB DESCRIPTION:
+{st.session_state.current_jd[:2000]}
 
-ORIGINAL: {st.session_state.master_resume[:1500]}
-TAILORED: {st.session_state.tailored_resume[:1500]}"""
-            
-            st.session_state.change_log = extract_json_from_response(call_gemini(changelog_prompt, 0.3)) or []
-            
-            packs_prompt = f"""Suggest 3 packs. Return JSON: [{{"title": "name", "lift": "+X%", "tokens": ["k1","k2"], "jd_evidence": "quote", "resume_evidence": "support"}}]
+TAILORED RESUME:
+{st.session_state.tailored_resume[:2000]}
 
-JD: {st.session_state.current_jd[:1500]}
-RESUME: {st.session_state.tailored_resume[:1500]}"""
+Return this format:
+[
+  {{"jd_anchor": "5+ years Python", "resume_match": "6 years Python at TechCorp", "verified": true}},
+  {{"jd_anchor": "ML deployment", "resume_match": "Deployed 15 models using TensorFlow", "verified": true}}
+]"""
             
-            st.session_state.refinement_packs = extract_json_from_response(call_gemini(packs_prompt, 0.5)) or []
+            evidence_response = call_gemini(evidence_prompt, 0.3)
+            evidence_data = extract_json_from_response(evidence_response)
+            st.session_state.evidence_map = evidence_data if isinstance(evidence_data, list) else []
+            
+            # Step 5: Change Log
+            changelog_prompt = f"""Return ONLY a JSON array showing key changes.
+
+ORIGINAL:
+{st.session_state.master_resume[:2000]}
+
+TAILORED:
+{st.session_state.tailored_resume[:2000]}
+
+Return this format:
+[
+  {{"before": "Built pipelines", "after": "Architected real-time pipelines using Kafka", "why": "JD emphasizes real-time processing"}}
+]"""
+            
+            changelog_response = call_gemini(changelog_prompt, 0.3)
+            changelog_data = extract_json_from_response(changelog_response)
+            st.session_state.change_log = changelog_data if isinstance(changelog_data, list) else []
+            
+            # Step 6: Refinement Packs
+            packs_prompt = f"""Return ONLY a JSON array with 3 keyword packs.
+
+JOB DESCRIPTION:
+{st.session_state.current_jd[:2000]}
+
+RESUME:
+{st.session_state.tailored_resume[:2000]}
+
+Return this format:
+[
+  {{"title": "Pack 1: Tech Stack", "lift": "+5%", "tokens": ["Python", "AWS", "Docker"], "jd_evidence": "requires Python and cloud", "resume_evidence": "has Python, AWS experience"}}
+]"""
+            
+            packs_response = call_gemini(packs_prompt, 0.5)
+            packs_data = extract_json_from_response(packs_response)
+            st.session_state.refinement_packs = packs_data if isinstance(packs_data, list) else []
+            
             st.rerun()
     
     if st.session_state.tailored_resume:
@@ -456,7 +535,7 @@ RESUME: {st.session_state.tailored_resume[:1500]}"""
         with col1:
             st.download_button("💾 Download", st.session_state.tailored_resume, "resume.txt", use_container_width=True)
         with col2:
-            if st.button("📋 Copy", use_container_width=True):
+            if st.button("📋 Show Code", use_container_width=True):
                 st.code(st.session_state.tailored_resume)
         
         if st.session_state.change_log:
@@ -473,16 +552,30 @@ RESUME: {st.session_state.tailored_resume[:1500]}"""
         if st.session_state.current_tool == "1" and st.session_state.refinement_packs:
             st.markdown("### 🎯 Refinement Packs")
             for idx, pack in enumerate(st.session_state.refinement_packs):
-                if st.checkbox(f"{pack.get('title','')} {pack.get('lift','')}", key=f"p{idx}"):
+                checked = st.checkbox(f"{pack.get('title','')} {pack.get('lift','')}", key=f"p{idx}", value=idx in st.session_state.selected_packs)
+                if checked:
                     st.session_state.selected_packs.add(idx)
-                    st.caption(", ".join(pack.get('tokens',[])))
+                    st.caption("Tokens: " + ", ".join(pack.get('tokens',[])))
                 else:
                     st.session_state.selected_packs.discard(idx)
             
             if st.button("Apply Packs", type="primary", use_container_width=True) and st.session_state.selected_packs:
-                with st.spinner("Applying..."):
+                with st.spinner("Applying packs..."):
                     packs = [st.session_state.refinement_packs[i] for i in st.session_state.selected_packs]
-                    st.session_state.tailored_resume = call_gemini(f"Apply packs: {json.dumps(packs)}\n\nRESUME: {st.session_state.tailored_resume}\nJD: {st.session_state.current_jd}\n\nEnd with [END_RESUME]", 0.7)
+                    apply_prompt = f"""Apply these keyword packs to the resume. Only add where evidence exists.
+
+PACKS TO APPLY:
+{json.dumps(packs, indent=2)}
+
+CURRENT RESUME:
+{st.session_state.tailored_resume}
+
+JOB DESCRIPTION:
+{st.session_state.current_jd}
+
+Return updated resume ending with [END_RESUME]:"""
+                    
+                    st.session_state.tailored_resume = call_gemini(apply_prompt, 0.7)
                     st.session_state.selected_packs = set()
                     st.session_state.current_tool = None
                     st.rerun()
@@ -493,348 +586,40 @@ with col_tracker:
     st.markdown("### 📊 Score Tracker")
     
     if st.session_state.scores:
-        pre = st.session_state.scores['pre']
-        post = st.session_state.scores['post']
-        delta = post.get('overall_score',0) - pre.get('overall_score',0)
+        pre = st.session_state.scores.get('pre', {})
+        post = st.session_state.scores.get('post', {})
         
-        st.markdown(f'<div class="score-card"><div style="display:flex;justify-content:space-around;align-items:center"><div><div class="score-number">{int(pre.get("overall_score",0))}</div><div class="score-label">Pre</div></div><div class="delta-positive">+{int(delta)}</div><div><div class="score-number">{int(post.get("overall_score",0))}</div><div class="score-label">Post</div></div></div></div>', unsafe_allow_html=True)
+        pre_overall = int(pre.get('overall_score', 0))
+        post_overall = int(post.get('overall_score', 0))
+        delta = post_overall - pre_overall
         
+        st.markdown(f'<div class="score-card"><div style="display:flex;justify-content:space-around;align-items:center"><div><div class="score-number">{pre_overall}</div><div class="score-label">PRE</div></div><div class="delta-positive">+{delta}</div><div><div class="score-number">{post_overall}</div><div class="score-label">POST</div></div></div></div>', unsafe_allow_html=True)
+        
+        st.markdown("#### Subscores")
         for key, lbl in [('skills_fit','Skills'),('experience_fit','Experience'),('ats_keywords_coverage','ATS'),('education_fit','Education')]:
-            st.metric(lbl, f"{int(post.get(key,0))}%")
+            val = int(post.get(key, 0))
+            st.metric(lbl, f"{val}%")
     
     if st.session_state.tailored_resume:
         st.markdown("---")
         st.markdown("### 🎯 Actions")
-        for num, lbl, ico in [("1","Refine","🎯"),("2","Boosters","✨"),("3","Coverage","📊"),("4","Presets","🎭"),("5","A/B","🔀"),("6","Level","⚖️"),("0","Next JD","🔄")]:
+        actions = [("1","Refine","🎯"),("2","Boosters","✨"),("3","Coverage","📊"),("4","Presets","🎭"),("5","A/B","🔀"),("6","Level","⚖️"),("0","Next JD","🔄")]
+        
+        for num, lbl, ico in actions:
             if st.button(f"{ico} {lbl}", key=f"o{num}", use_container_width=True):
                 if num == "0":
-                    for k in ['current_jd','tailored_resume','scores','evidence_map','change_log','refinement_packs','current_tool']:
-                        st.session_state[k] = {} if 'scores' in k else [] if k in ['evidence_map','change_log','refinement_packs'] else None
+                    st.session_state.current_jd = None
+                    st.session_state.tailored_resume = None
+                    st.session_state.scores = {}
+                    st.session_state.evidence_map = []
+                    st.session_state.change_log = []
+                    st.session_state.refinement_packs = []
+                    st.session_state.current_tool = None
+                    st.session_state.selected_packs = set()
                     st.rerun()
                 else:
                     st.session_state.current_tool = num
                     st.rerun()
 
-# --- Custom CSS ------------------------------------------------------------
-st.markdown("""
-<style>
-    /* Import Inter font */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
-    
-    /* FORCE DARK MODE - Override Streamlit defaults */
-    .stApp {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-        font-family: 'Inter', sans-serif;
-    }
-    
-    /* Hide Streamlit branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    .stDeployButton {display: none;}
-    
-    /* Dark theme for all text */
-    .stApp, .stApp * {
-        color: #e0e0e0 !important;
-    }
-    
-    /* Override Streamlit's white backgrounds */
-    .stApp > div > div {
-        background: transparent !important;
-    }
-    
-    /* File uploader dark styling */
-    .stFileUploader {
-        background: rgba(30, 30, 46, 0.8) !important;
-        border: 2px dashed #7e22ce !important;
-        border-radius: 16px !important;
-        padding: 2rem !important;
-    }
-    
-    .stFileUploader label {
-        color: #a78bfa !important;
-        font-weight: 700 !important;
-        font-size: 1.2rem !important;
-    }
-    
-    .stFileUploader > div {
-        background: transparent !important;
-    }
-    
-    /* Text area dark styling */
-    .stTextArea textarea {
-        background: #1e1e2e !important;
-        color: #e0e0e0 !important;
-        border: 2px solid #7e22ce !important;
-        border-radius: 12px !important;
-        font-family: 'Inter', sans-serif !important;
-    }
-    
-    .stTextArea label {
-        color: #a78bfa !important;
-        font-weight: 600 !important;
-    }
-    
-    /* Buttons */
-    .stButton button {
-        background: linear-gradient(135deg, #7e22ce 0%, #6d28d9 100%) !important;
-        color: white !important;
-        border: none !important;
-        border-radius: 12px !important;
-        padding: 0.75rem 1.5rem !important;
-        font-weight: 700 !important;
-        font-size: 1rem !important;
-        transition: all 0.3s ease !important;
-    }
-    
-    .stButton button:hover {
-        transform: translateY(-2px) !important;
-        box-shadow: 0 8px 25px rgba(126, 34, 206, 0.4) !important;
-    }
-    
-    /* Primary button (AutoTailor) */
-    .stButton button[kind="primary"] {
-        background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
-        font-size: 1.1rem !important;
-        padding: 1rem 2rem !important;
-    }
-    
-    /* Radio buttons */
-    .stRadio {
-        background: rgba(30, 30, 46, 0.6) !important;
-        padding: 1rem !important;
-        border-radius: 12px !important;
-    }
-    
-    .stRadio label {
-        color: #a78bfa !important;
-    }
-    
-    /* Score card styling */
-    .score-card {
-        background: linear-gradient(135deg, #1e3c72 0%, #7e22ce 100%);
-        color: white !important;
-        padding: 2rem;
-        border-radius: 20px;
-        text-align: center;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-    }
-    
-    .score-number {
-        font-size: 4rem !important;
-        font-weight: 800 !important;
-        line-height: 1 !important;
-        color: white !important;
-    }
-    
-    .score-label {
-        font-size: 0.9rem !important;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        opacity: 0.9;
-        margin-top: 0.5rem;
-        color: white !important;
-    }
-    
-    .delta-positive {
-        color: #10b981 !important;
-        font-size: 2.5rem !important;
-        font-weight: 700 !important;
-    }
-    
-    /* Metrics (subscores) */
-    .stMetric {
-        background: rgba(126, 34, 206, 0.2) !important;
-        padding: 1rem !important;
-        border-radius: 12px !important;
-        border: 1px solid rgba(126, 34, 206, 0.3) !important;
-    }
-    
-    .stMetric label {
-        color: #a78bfa !important;
-        font-weight: 600 !important;
-    }
-    
-    .stMetric [data-testid="stMetricValue"] {
-        color: white !important;
-        font-size: 1.8rem !important;
-        font-weight: 700 !important;
-    }
-    
-    /* Evidence row */
-    .evidence-row {
-        background: linear-gradient(135deg, rgba(126, 34, 206, 0.15) 0%, rgba(30, 60, 114, 0.15) 100%);
-        border-left: 4px solid #7e22ce;
-        padding: 1rem;
-        border-radius: 12px;
-        margin-bottom: 0.8rem;
-    }
-    
-    .jd-anchor {
-        font-weight: 600 !important;
-        color: #a78bfa !important;
-        font-size: 0.95rem !important;
-    }
-    
-    .resume-match {
-        color: #d1d5db !important;
-        font-size: 0.88rem !important;
-        margin-top: 0.5rem;
-    }
-    
-    .badge-verified {
-        background: #10b981 !important;
-        color: white !important;
-        padding: 0.2rem 0.6rem;
-        border-radius: 6px;
-        font-size: 0.75rem;
-        font-weight: 700;
-        margin-left: 0.5rem;
-    }
-    
-    .badge-pending {
-        background: #f59e0b !important;
-        color: white !important;
-        padding: 0.2rem 0.6rem;
-        border-radius: 6px;
-        font-size: 0.75rem;
-        font-weight: 700;
-        margin-left: 0.5rem;
-    }
-    
-    /* Change log */
-    .change-item {
-        background: rgba(30, 60, 114, 0.2);
-        padding: 1rem;
-        border-radius: 12px;
-        margin-bottom: 0.8rem;
-        border-left: 4px solid #3b82f6;
-    }
-    
-    .change-before {
-        color: #ef4444 !important;
-        text-decoration: line-through;
-        font-size: 0.88rem;
-    }
-    
-    .change-after {
-        color: #10b981 !important;
-        font-weight: 600 !important;
-        font-size: 0.88rem !important;
-        margin-top: 0.3rem;
-    }
-    
-    .change-why {
-        color: #9ca3af !important;
-        font-size: 0.8rem !important;
-        font-style: italic;
-        margin-top: 0.3rem;
-    }
-    
-    /* Resume output */
-    .resume-output {
-        background: #0f0f1e !important;
-        color: #e5e7eb !important;
-        padding: 1.5rem;
-        border-radius: 16px;
-        font-family: 'Courier New', monospace !important;
-        font-size: 0.85rem;
-        line-height: 1.7;
-        max-height: 600px;
-        overflow-y: auto;
-        white-space: pre-wrap;
-        border: 2px solid rgba(126, 34, 206, 0.3);
-    }
-    
-    .end-marker {
-        color: #10b981 !important;
-        font-weight: 700 !important;
-        text-align: center;
-        margin-top: 1rem;
-    }
-    
-    /* Checkboxes */
-    .stCheckbox {
-        background: rgba(30, 30, 46, 0.6) !important;
-        padding: 0.5rem !important;
-        border-radius: 8px !important;
-    }
-    
-    .stCheckbox label {
-        color: #e0e0e0 !important;
-        font-weight: 600 !important;
-    }
-    
-    /* Expander */
-    .stExpander {
-        background: rgba(30, 30, 46, 0.6) !important;
-        border: 1px solid rgba(126, 34, 206, 0.3) !important;
-        border-radius: 12px !important;
-    }
-    
-    .stExpander label {
-        color: #a78bfa !important;
-    }
-    
-    /* Download button */
-    .stDownloadButton button {
-        background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
-        color: white !important;
-    }
-    
-    /* Info box */
-    .stAlert {
-        background: rgba(126, 34, 206, 0.2) !important;
-        border: 2px solid #7e22ce !important;
-        border-radius: 12px !important;
-        color: #e0e0e0 !important;
-    }
-    
-    /* Success box */
-    .stSuccess {
-        background: rgba(16, 185, 129, 0.2) !important;
-        border: 2px solid #10b981 !important;
-        color: #e0e0e0 !important;
-    }
-    
-    /* Spinner */
-    .stSpinner > div {
-        border-top-color: #7e22ce !important;
-    }
-    
-    /* No fabrication badge */
-    .no-fabrication {
-        background: linear-gradient(135deg, #059669 0%, #10b981 100%) !important;
-        color: white !important;
-        padding: 1rem 1.5rem;
-        border-radius: 12px;
-        text-align: center;
-        font-weight: 700 !important;
-        margin: 1.5rem 0;
-        box-shadow: 0 6px 20px rgba(16, 185, 129, 0.3);
-    }
-    
-    /* Column styling */
-    .stColumn {
-        background: transparent !important;
-    }
-    
-    /* Section headers */
-    h1, h2, h3, h4, h5, h6 {
-        color: white !important;
-        font-weight: 700 !important;
-    }
-    
-    /* Caption text */
-    .stCaption {
-        color: #9ca3af !important;
-    }
-    
-    /* Code blocks */
-    .stCode {
-        background: #0f0f1e !important;
-        border: 1px solid rgba(126, 34, 206, 0.3) !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+st.markdown("---")
+st.caption("Built with Streamlit + Gemini 2.0 Flash | ReadysetRole v1.0")
