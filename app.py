@@ -665,3 +665,327 @@ Generate updated resume:"""
 
 st.markdown("---")
 st.caption("Built with Streamlit + Gemini 2.0 Flash | ReadysetRole v1.0")
+
+# --- Custom CSS ------------------------------------------------------------
+st.markdown("""
+<style>
+    /* Import Inter font */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+    
+    /* FORCE DARK MODE - Override Streamlit defaults */
+    .stApp {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+        font-family: 'Inter', sans-serif;
+    }
+    
+    /* Hide Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stDeployButton {display: none;}
+    
+    /* Dark theme for all text */
+    .stApp, .stApp * {
+        color: #e0e0e0 !important;
+    }
+    
+    /* Override Streamlit's white backgrounds */
+    .stApp > div > div {
+        background: transparent !important;
+    }
+    
+    /* File uploader dark styling */
+    .stFileUploader {
+        background: rgba(30, 30, 46, 0.8) !important;
+        border: 2px dashed #7e22ce !important;
+        border-radius: 16px !important;
+        padding: 2rem !important;
+    }
+    
+    .stFileUploader label {
+        color: #a78bfa !important;
+        font-weight: 700 !important;
+        font-size: 1.2rem !important;
+    }
+    
+    .stFileUploader > div {
+        background: transparent !important;
+    }
+    
+    /* Text area dark styling */
+    .stTextArea textarea {
+        background: #1e1e2e !important;
+        color: #e0e0e0 !important;
+        border: 2px solid #7e22ce !important;
+        border-radius: 12px !important;
+        font-family: 'Inter', sans-serif !important;
+    }
+    
+    .stTextArea label {
+        color: #a78bfa !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Buttons */
+    .stButton button {
+        background: linear-gradient(135deg, #7e22ce 0%, #6d28d9 100%) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 12px !important;
+        padding: 0.75rem 1.5rem !important;
+        font-weight: 700 !important;
+        font-size: 1rem !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    .stButton button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 8px 25px rgba(126, 34, 206, 0.4) !important;
+    }
+    
+    /* Primary button (AutoTailor) */
+    .stButton button[kind="primary"] {
+        background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
+        font-size: 1.1rem !important;
+        padding: 1rem 2rem !important;
+    }
+    
+    /* Radio buttons */
+    .stRadio {
+        background: rgba(30, 30, 46, 0.6) !important;
+        padding: 1rem !important;
+        border-radius: 12px !important;
+    }
+    
+    .stRadio label {
+        color: #a78bfa !important;
+    }
+    
+    /* Score card styling */
+    .score-card {
+        background: linear-gradient(135deg, #1e3c72 0%, #7e22ce 100%);
+        color: white !important;
+        padding: 2rem;
+        border-radius: 20px;
+        text-align: center;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    
+    .score-number {
+        font-size: 4rem !important;
+        font-weight: 800 !important;
+        line-height: 1 !important;
+        color: white !important;
+    }
+    
+    .score-label {
+        font-size: 0.9rem !important;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        opacity: 0.9;
+        margin-top: 0.5rem;
+        color: white !important;
+    }
+    
+    .delta-positive {
+        color: #10b981 !important;
+        font-size: 2.5rem !important;
+        font-weight: 700 !important;
+    }
+    
+    /* Metrics (subscores) */
+    .stMetric {
+        background: rgba(126, 34, 206, 0.2) !important;
+        padding: 1rem !important;
+        border-radius: 12px !important;
+        border: 1px solid rgba(126, 34, 206, 0.3) !important;
+    }
+    
+    .stMetric label {
+        color: #a78bfa !important;
+        font-weight: 600 !important;
+    }
+    
+    .stMetric [data-testid="stMetricValue"] {
+        color: white !important;
+        font-size: 1.8rem !important;
+        font-weight: 700 !important;
+    }
+    
+    /* Evidence row */
+    .evidence-row {
+        background: linear-gradient(135deg, rgba(126, 34, 206, 0.15) 0%, rgba(30, 60, 114, 0.15) 100%);
+        border-left: 4px solid #7e22ce;
+        padding: 1rem;
+        border-radius: 12px;
+        margin-bottom: 0.8rem;
+    }
+    
+    .jd-anchor {
+        font-weight: 600 !important;
+        color: #a78bfa !important;
+        font-size: 0.95rem !important;
+    }
+    
+    .resume-match {
+        color: #d1d5db !important;
+        font-size: 0.88rem !important;
+        margin-top: 0.5rem;
+    }
+    
+    .badge-verified {
+        background: #10b981 !important;
+        color: white !important;
+        padding: 0.2rem 0.6rem;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        margin-left: 0.5rem;
+    }
+    
+    .badge-pending {
+        background: #f59e0b !important;
+        color: white !important;
+        padding: 0.2rem 0.6rem;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        margin-left: 0.5rem;
+    }
+    
+    /* Change log */
+    .change-item {
+        background: rgba(30, 60, 114, 0.2);
+        padding: 1rem;
+        border-radius: 12px;
+        margin-bottom: 0.8rem;
+        border-left: 4px solid #3b82f6;
+    }
+    
+    .change-before {
+        color: #ef4444 !important;
+        text-decoration: line-through;
+        font-size: 0.88rem;
+    }
+    
+    .change-after {
+        color: #10b981 !important;
+        font-weight: 600 !important;
+        font-size: 0.88rem !important;
+        margin-top: 0.3rem;
+    }
+    
+    .change-why {
+        color: #9ca3af !important;
+        font-size: 0.8rem !important;
+        font-style: italic;
+        margin-top: 0.3rem;
+    }
+    
+    /* Resume output */
+    .resume-output {
+        background: #0f0f1e !important;
+        color: #e5e7eb !important;
+        padding: 1.5rem;
+        border-radius: 16px;
+        font-family: 'Courier New', monospace !important;
+        font-size: 0.85rem;
+        line-height: 1.7;
+        max-height: 600px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        border: 2px solid rgba(126, 34, 206, 0.3);
+    }
+    
+    .end-marker {
+        color: #10b981 !important;
+        font-weight: 700 !important;
+        text-align: center;
+        margin-top: 1rem;
+    }
+    
+    /* Checkboxes */
+    .stCheckbox {
+        background: rgba(30, 30, 46, 0.6) !important;
+        padding: 0.5rem !important;
+        border-radius: 8px !important;
+    }
+    
+    .stCheckbox label {
+        color: #e0e0e0 !important;
+        font-weight: 600 !important;
+    }
+    
+    /* Expander */
+    .stExpander {
+        background: rgba(30, 30, 46, 0.6) !important;
+        border: 1px solid rgba(126, 34, 206, 0.3) !important;
+        border-radius: 12px !important;
+    }
+    
+    .stExpander label {
+        color: #a78bfa !important;
+    }
+    
+    /* Download button */
+    .stDownloadButton button {
+        background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
+        color: white !important;
+    }
+    
+    /* Info box */
+    .stAlert {
+        background: rgba(126, 34, 206, 0.2) !important;
+        border: 2px solid #7e22ce !important;
+        border-radius: 12px !important;
+        color: #e0e0e0 !important;
+    }
+    
+    /* Success box */
+    .stSuccess {
+        background: rgba(16, 185, 129, 0.2) !important;
+        border: 2px solid #10b981 !important;
+        color: #e0e0e0 !important;
+    }
+    
+    /* Spinner */
+    .stSpinner > div {
+        border-top-color: #7e22ce !important;
+    }
+    
+    /* No fabrication badge */
+    .no-fabrication {
+        background: linear-gradient(135deg, #059669 0%, #10b981 100%) !important;
+        color: white !important;
+        padding: 1rem 1.5rem;
+        border-radius: 12px;
+        text-align: center;
+        font-weight: 700 !important;
+        margin: 1.5rem 0;
+        box-shadow: 0 6px 20px rgba(16, 185, 129, 0.3);
+    }
+    
+    /* Column styling */
+    .stColumn {
+        background: transparent !important;
+    }
+    
+    /* Section headers */
+    h1, h2, h3, h4, h5, h6 {
+        color: white !important;
+        font-weight: 700 !important;
+    }
+    
+    /* Caption text */
+    .stCaption {
+        color: #9ca3af !important;
+    }
+    
+    /* Code blocks */
+    .stCode {
+        background: #0f0f1e !important;
+        border: 1px solid rgba(126, 34, 206, 0.3) !important;
+    }
+</style>
+""", unsafe_allow_html=True)
